@@ -2,11 +2,23 @@
 Tutorial
 ========
 
-`Alembic <http://bitbucket.org/zzzeek/alembic>`_ provides for the creation, management, and invocation of *change management*
-scripts for a relational database, using `SQLAlchemy <http://www.sqlalchemy.org>`_ as the underlying engine.
+Alembic provides for the creation, management, and invocation of *change management*
+scripts for a relational database, using SQLAlchemy as the underlying engine.
 This tutorial will provide a full introduction to the theory and usage of this tool.
 
 To begin, make sure Alembic is installed as described at :ref:`installation`.
+As stated in the linked document, it is usually preferable that Alembic is
+installed in the **same module / Python path as that of the target project**,
+usually using a `Python virtual environment
+<https://docs.python.org/3/tutorial/venv.html>`_, so that when the ``alembic``
+command is run, the Python script which is invoked by ``alembic``,  namely your
+project's ``env.py`` script, will have access to your application's models.
+This is not strictly necessary in all cases, however in the vast majority of
+cases is usually preferred.
+
+The tutorial below assumes the ``alembic`` command line utility is present in
+the local path and when invoked, will have access to the same Python module
+environment as that of the target project.
 
 The Migration Environment
 ==========================
@@ -72,7 +84,8 @@ Creating an Environment
 With a basic understanding of what the environment is, we can create one using ``alembic init``.
 This will create an environment using the "generic" template::
 
-    $ cd yourproject
+    $ cd /path/to/yourproject
+    $ source /path/to/yourproject/.venv/bin/activate   # assuming a local virtualenv
     $ alembic init alembic
 
 Where above, the ``init`` command was called to generate a migrations directory called ``alembic``::
@@ -127,7 +140,7 @@ The file generated with the "generic" configuration looks like::
 
     # max length of characters to apply to the
     # "slug" field
-    #truncate_slug_length = 40
+    # truncate_slug_length = 40
 
     # set to 'true' to run the environment during
     # the 'revision' command, regardless of autogenerate
@@ -148,6 +161,17 @@ The file generated with the "generic" configuration looks like::
     # output_encoding = utf-8
 
     sqlalchemy.url = driver://user:pass@localhost/dbname
+
+    # post_write_hooks defines scripts or Python functions that are run
+    # on newly generated revision scripts.  See the documentation for further
+    # detail and examples
+
+    # format using "black" - use the console_scripts runner,
+    # against the "black" entrypoint
+    # hooks=black
+    # black.type=console_scripts
+    # black.entrypoint=black
+    # black.options=-l 79
 
     # Logging configuration
     [loggers]
@@ -206,8 +230,8 @@ This file contains the following features:
   as in ``%(here)s/alembic``.
 
   For support of applications that package themselves into .egg files, the value can
-  also be specified
-  as a `package resource <https://pythonhosted.org/setuptools/pkg_resources.html>`_, in which
+  also be specified as a `package resource
+  <https://setuptools.readthedocs.io/en/latest/pkg_resources.html>`_, in which
   case ``resource_filename()`` is used to find the file (new in 0.2.2).  Any non-absolute
   URI which contains colons is interpreted here as a resource name, rather than
   a straight filename.
@@ -241,14 +265,26 @@ This file contains the following features:
 
   .. versionadded:: 0.6.1 - added ``truncate_slug_length`` configuration
 
-* ``sqlalchemy.url`` - A URL to connect to the database via SQLAlchemy.  This key is in fact
-  only referenced within the ``env.py`` file that is specific to the "generic" configuration;
-  a file that can be customized by the developer. A multiple
-  database configuration may respond to multiple keys here, or may reference other sections
-  of the file.
+* ``sqlalchemy.url`` - A URL to connect to the database via SQLAlchemy.  This
+  configuration value is only used if the ``env.py`` file calls upon them;
+  in the "generic" template, the call to
+  ``config.get_main_option("sqlalchemy.url")`` in the
+  ``run_migrations_offline()`` function and the call to
+  ``engine_from_config(prefix="sqlalchemy.")``  in the
+  ``run_migrations_online()`` function are where this key is referenced.   If
+  the SQLAlchemy URL should come from some other source, such as from
+  environment variables or a global registry, or if the migration environment
+  makes use of multiple database URLs, the developer is encouraged to alter the
+  ``env.py`` file to use whatever methods are appropriate in order to acquire
+  the database URL or URLs.
+
 * ``revision_environment`` - this is a flag which when set to the value 'true', will indicate
   that the migration environment script ``env.py`` should be run unconditionally when
-  generating new revision files
+  generating new revision files, as well as when running the ``alembic history``
+  command.
+
+  .. versionchanged:: 0.9.6 the ``alembic history`` command uses the environment
+     unconditionally when ``revision_environment`` is set to true.
 
 * ``sourceless`` - when set to 'true', revision files that only exist as .pyc
   or .pyo files in the versions directory will be used as versions, allowing

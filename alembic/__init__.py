@@ -1,15 +1,11 @@
-from os import path
-
-__version__ = '0.9.3'
-
-package_dir = path.abspath(path.dirname(__file__))
-
-
-from . import op  # noqa
-from . import context  # noqa
-
 import sys
+
+from . import context  # noqa
+from . import op  # noqa
 from .runtime import environment
 from .runtime import migration
-sys.modules['alembic.migration'] = migration
-sys.modules['alembic.environment'] = environment
+
+__version__ = '1.4.1'
+
+sys.modules["alembic.migration"] = migration
+sys.modules["alembic.environment"] = environment

@@ -1,4 +1,6 @@
-changelog>=0.3.5
-sphinx-paramlinks>=0.3.2
+git+https://github.com/sqlalchemyorg/changelog.git#egg=changelog
+git+https://github.com/sqlalchemyorg/sphinx-paramlinks.git#egg=sphinx-paramlinks
+git+https://github.com/sqlalchemy/sqlalchemy.git
 python-dateutil
-git+https://bitbucket.org/zzzeek/sqlalchemy.git
+# because there's a dependency in pyfiles.py
+Mako

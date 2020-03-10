@@ -1,14 +1,15 @@
 from contextlib import contextmanager
+import textwrap
 
-from .. import util
-from ..util import sqla_compat
 from . import batch
 from . import schemaobj
+from .. import util
+from ..util import sqla_compat
 from ..util.compat import exec_
-import textwrap
-import inspect
+from ..util.compat import inspect_formatargspec
+from ..util.compat import inspect_getargspec
 
-__all__ = ('Operations', 'BatchOperations')
+__all__ = ("Operations", "BatchOperations")
 
 try:
     from sqlalchemy.sql.naming import conv
@@ -83,6 +84,7 @@ class Operations(util.ModuleClsProxy):
 
 
         """
+
         def register(op_cls):
             if sourcename is None:
                 fn = getattr(op_cls, name)
@@ -91,48 +93,56 @@ class Operations(util.ModuleClsProxy):
                 fn = getattr(op_cls, sourcename)
                 source_name = fn.__name__
 
-            spec = inspect.getargspec(fn)
+            spec = inspect_getargspec(fn)
 
             name_args = spec[0]
-            assert name_args[0:2] == ['cls', 'operations']
+            assert name_args[0:2] == ["cls", "operations"]
 
-            name_args[0:2] = ['self']
+            name_args[0:2] = ["self"]
 
-            args = inspect.formatargspec(*spec)
+            args = inspect_formatargspec(*spec)
             num_defaults = len(spec[3]) if spec[3] else 0
             if num_defaults:
-                defaulted_vals = name_args[0 - num_defaults:]
+                defaulted_vals = name_args[0 - num_defaults :]
             else:
                 defaulted_vals = ()
 
-            apply_kw = inspect.formatargspec(
-                name_args, spec[1], spec[2],
+            apply_kw = inspect_formatargspec(
+                name_args,
+                spec[1],
+                spec[2],
                 defaulted_vals,
-                formatvalue=lambda x: '=' + x)
+                formatvalue=lambda x: "=" + x,
+            )
 
-            func_text = textwrap.dedent("""\
+            func_text = textwrap.dedent(
+                """\
             def %(name)s%(args)s:
                 %(doc)r
                 return op_cls.%(source_name)s%(apply_kw)s
-            """ % {
-                'name': name,
-                'source_name': source_name,
-                'args': args,
-                'apply_kw': apply_kw,
-                'doc': fn.__doc__,
-                'meth': fn.__name__
-            })
-            globals_ = {'op_cls': op_cls}
+            """
+                % {
+                    "name": name,
+                    "source_name": source_name,
+                    "args": args,
+                    "apply_kw": apply_kw,
+                    "doc": fn.__doc__,
+                    "meth": fn.__name__,
+                }
+            )
+            globals_ = {"op_cls": op_cls}
             lcl = {}
             exec_(func_text, globals_, lcl)
             setattr(cls, name, lcl[name])
-            fn.__func__.__doc__ = "This method is proxied on "\
-                "the :class:`.%s` class, via the :meth:`.%s.%s` method." % (
-                    cls.__name__, cls.__name__, name
-                )
-            if hasattr(fn, '_legacy_translations'):
+            fn.__func__.__doc__ = (
+                "This method is proxied on "
+                "the :class:`.%s` class, via the :meth:`.%s.%s` method."
+                % (cls.__name__, cls.__name__, name)
+            )
+            if hasattr(fn, "_legacy_translations"):
                 lcl[name]._legacy_translations = fn._legacy_translations
             return op_cls
+
         return register
 
     @classmethod
@@ -150,6 +160,7 @@ class Operations(util.ModuleClsProxy):
         def decorate(fn):
             cls._to_impl.dispatch_for(op_cls)(fn)
             return fn
+
         return decorate
 
     @classmethod
@@ -162,10 +173,18 @@ class Operations(util.ModuleClsProxy):
 
     @contextmanager
     def batch_alter_table(
-            self, table_name, schema=None, recreate="auto", copy_from=None,
-            table_args=(), table_kwargs=util.immutabledict(),
-            reflect_args=(), reflect_kwargs=util.immutabledict(),
-            naming_convention=None):
+        self,
+        table_name,
+        schema=None,
+        recreate="auto",
+        partial_reordering=None,
+        copy_from=None,
+        table_args=(),
+        table_kwargs=util.immutabledict(),
+        reflect_args=(),
+        reflect_kwargs=util.immutabledict(),
+        naming_convention=None,
+    ):
         """Invoke a series of per-table migrations in batch.
 
         Batch mode allows a series of operations specific to a table
@@ -283,6 +302,33 @@ class Operations(util.ModuleClsProxy):
 
          .. versionadded:: 0.7.1
 
+        :param partial_reordering: a list of tuples, each suggesting a desired
+         ordering of two or more columns in the newly created table.  Requires
+         that :paramref:`.batch_alter_table.recreate` is set to ``"always"``.
+         Examples, given a table with columns "a", "b", "c", and "d":
+
+         Specify the order of all columns::
+
+            with op.batch_alter_table(
+                    "some_table", recreate="always",
+                    partial_reordering=[("c", "d", "a", "b")]
+            ) as batch_op:
+                pass
+
+         Ensure "d" appears before "c", and "b", appears before "a"::
+
+            with op.batch_alter_table(
+                    "some_table", recreate="always",
+                    partial_reordering=[("d", "c"), ("b", "a")]
+            ) as batch_op:
+                pass
+
+         The ordering of columns not included in the partial_reordering
+         set is undefined.   Therefore it is best to specify the complete
+         ordering of all columns for best results.
+
+         .. versionadded:: 1.4.0
+
         .. note:: batch mode requires SQLAlchemy 0.8 or above.
 
         .. seealso::
@@ -291,9 +337,18 @@ class Operations(util.ModuleClsProxy):
 
         """
         impl = batch.BatchOperationsImpl(
-            self, table_name, schema, recreate,
-            copy_from, table_args, table_kwargs, reflect_args,
-            reflect_kwargs, naming_convention)
+            self,
+            table_name,
+            schema,
+            recreate,
+            copy_from,
+            table_args,
+            table_kwargs,
+            reflect_args,
+            reflect_kwargs,
+            naming_convention,
+            partial_reordering,
+        )
         batch_op = BatchOperations(self.migration_context, impl=impl)
         yield batch_op
         impl.flush()
@@ -314,7 +369,8 @@ class Operations(util.ModuleClsProxy):
 
         """
         fn = self._to_impl.dispatch(
-            operation, self.migration_context.impl.__dialect__)
+            operation, self.migration_context.impl.__dialect__
+        )
         return fn(self, operation)
 
     def f(self, name):
@@ -362,10 +418,11 @@ class Operations(util.ModuleClsProxy):
             return conv(name)
         else:
             raise NotImplementedError(
-                "op.f() feature requires SQLAlchemy 0.9.4 or greater.")
+                "op.f() feature requires SQLAlchemy 0.9.4 or greater."
+            )
 
     def inline_literal(self, value, type_=None):
-        """Produce an 'inline literal' expression, suitable for
+        r"""Produce an 'inline literal' expression, suitable for
         using in an INSERT, UPDATE, or DELETE statement.
 
         When using Alembic in "offline" mode, CRUD operations
@@ -395,7 +452,7 @@ class Operations(util.ModuleClsProxy):
          numerics should be supported.   Other types like boolean,
          dates, etc. may or may not be supported yet by various
          backends.
-        :param type_: optional - a :class:`sqlalchemy.types.TypeEngine`
+        :param type\_: optional - a :class:`sqlalchemy.types.TypeEngine`
          subclass stating the type of this value.  In SQLAlchemy
          expressions, this is usually derived automatically
          from the Python type of the value itself, as well as
@@ -441,4 +498,5 @@ class BatchOperations(Operations):
     def _noop(self, operation):
         raise NotImplementedError(
             "The %s method does not apply to a batch table alter operation."
-            % operation)
+            % operation
+        )
