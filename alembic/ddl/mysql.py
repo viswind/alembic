@@ -15,7 +15,7 @@ from .base import format_server_default
 from .impl import DefaultImpl
 from .. import util
 from ..autogenerate import compare
-from ..util.compat import string_types
+from ..util import sqla_compat
 from ..util.sqla_compat import _is_mariadb
 from ..util.sqla_compat import _is_type_bound
 
@@ -25,6 +25,7 @@ class MySQLImpl(DefaultImpl):
 
     transactional_ddl = False
     type_synonyms = DefaultImpl.type_synonyms + ({"BOOL", "TINYINT"},)
+    type_arg_extract = [r"character set ([\w\-_]+)", r"collate ([\w\-_]+)"]
 
     def alter_column(
         self,
@@ -44,6 +45,25 @@ class MySQLImpl(DefaultImpl):
         existing_comment=None,
         **kw
     ):
+        if sqla_compat._server_default_is_identity(
+            server_default, existing_server_default
+        ) or sqla_compat._server_default_is_computed(
+            server_default, existing_server_default
+        ):
+            # modifying computed or identity columns is not supported
+            # the default will raise
+            super(MySQLImpl, self).alter_column(
+                table_name,
+                column_name,
+                nullable=nullable,
+                type_=type_,
+                schema=schema,
+                existing_type=existing_type,
+                existing_nullable=existing_nullable,
+                server_default=server_default,
+                existing_server_default=existing_server_default,
+                **kw
+            )
         if name is not None or self._is_mysql_allowed_functional_default(
             type_ if type_ is not None else existing_type, server_default
         ):
@@ -243,6 +263,10 @@ class MySQLImpl(DefaultImpl):
                 cnfk.onupdate = "RESTRICT"
 
 
+class MariaDBImpl(MySQLImpl):
+    __dialect__ = "mariadb"
+
+
 class MySQLAlterDefault(AlterColumn):
     def __init__(self, name, column_name, default, schema=None):
         super(AlterColumn, self).__init__(name, schema=schema)
@@ -283,17 +307,17 @@ class MySQLModifyColumn(MySQLChangeColumn):
     pass
 
 
-@compiles(ColumnNullable, "mysql")
-@compiles(ColumnName, "mysql")
-@compiles(ColumnDefault, "mysql")
-@compiles(ColumnType, "mysql")
+@compiles(ColumnNullable, "mysql", "mariadb")
+@compiles(ColumnName, "mysql", "mariadb")
+@compiles(ColumnDefault, "mysql", "mariadb")
+@compiles(ColumnType, "mysql", "mariadb")
 def _mysql_doesnt_support_individual(element, compiler, **kw):
     raise NotImplementedError(
         "Individual alter column constructs not supported by MySQL"
     )
 
 
-@compiles(MySQLAlterDefault, "mysql")
+@compiles(MySQLAlterDefault, "mysql", "mariadb")
 def _mysql_alter_default(element, compiler, **kw):
     return "%s ALTER COLUMN %s %s" % (
         alter_table(compiler, element.table_name, element.schema),
@@ -304,7 +328,7 @@ def _mysql_alter_default(element, compiler, **kw):
     )
 
 
-@compiles(MySQLModifyColumn, "mysql")
+@compiles(MySQLModifyColumn, "mysql", "mariadb")
 def _mysql_modify_column(element, compiler, **kw):
     return "%s MODIFY %s %s" % (
         alter_table(compiler, element.table_name, element.schema),
@@ -320,7 +344,7 @@ def _mysql_modify_column(element, compiler, **kw):
     )
 
 
-@compiles(MySQLChangeColumn, "mysql")
+@compiles(MySQLChangeColumn, "mysql", "mariadb")
 def _mysql_change_column(element, compiler, **kw):
     return "%s CHANGE %s %s %s" % (
         alter_table(compiler, element.table_name, element.schema),
@@ -337,13 +361,6 @@ def _mysql_change_column(element, compiler, **kw):
     )
 
 
-def _render_value(compiler, expr):
-    if isinstance(expr, string_types):
-        return "'%s'" % expr
-    else:
-        return compiler.sql_compiler.process(expr)
-
-
 def _mysql_colspec(
     compiler, nullable, server_default, type_, autoincrement, comment
 ):
@@ -354,7 +371,7 @@ def _mysql_colspec(
     if autoincrement:
         spec += " AUTO_INCREMENT"
     if server_default is not False and server_default is not None:
-        spec += " DEFAULT %s" % _render_value(compiler, server_default)
+        spec += " DEFAULT %s" % format_server_default(compiler, server_default)
     if comment:
         spec += " COMMENT %s" % compiler.sql_compiler.render_literal_value(
             comment, sqltypes.String()
@@ -363,7 +380,7 @@ def _mysql_colspec(
     return spec
 
 
-@compiles(schema.DropConstraint, "mysql")
+@compiles(schema.DropConstraint, "mysql", "mariadb")
 def _mysql_drop_constraint(element, compiler, **kw):
     """Redefine SQLAlchemy's drop constraint to
     raise errors for invalid constraint type."""

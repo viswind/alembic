@@ -13,10 +13,11 @@ from sqlalchemy import Table
 from sqlalchemy import UniqueConstraint
 
 from alembic.testing import assertions
+from alembic.testing import combinations
 from alembic.testing import config
-from alembic.testing import engines
 from alembic.testing import eq_
 from alembic.testing import TestBase
+from alembic.testing import util
 from alembic.testing.env import staging_env
 from alembic.util import sqla_compat
 from ._autogen_fixtures import AutogenFixtureTest
@@ -29,7 +30,7 @@ class NoUqReflection(object):
 
     def setUp(self):
         staging_env()
-        self.bind = eng = engines.testing_engine()
+        self.bind = eng = util.testing_engine()
 
         def unimpl(*arg, **kw):
             raise NotImplementedError()
@@ -74,11 +75,12 @@ class AutogenerateUniqueIndexTest(AutogenFixtureTest, TestBase):
         diffs = self._fixture(m1, m2)
 
         if self.reports_unique_constraints:
-            eq_(diffs[0][0], "add_constraint")
-            eq_(diffs[0][1].name, "uq_user_name")
+            eq_(diffs[0][0], "remove_index")
+            eq_(diffs[0][1].name, "ix_user_name")
 
-            eq_(diffs[1][0], "remove_index")
-            eq_(diffs[1][1].name, "ix_user_name")
+            eq_(diffs[1][0], "add_constraint")
+            eq_(diffs[1][1].name, "uq_user_name")
+
         else:
             eq_(diffs[0][0], "remove_index")
             eq_(diffs[0][1].name, "ix_user_name")
@@ -331,6 +333,7 @@ class AutogenerateUniqueIndexTest(AutogenFixtureTest, TestBase):
         diffs = self._fixture(m1, m2, max_identifier_length=30)
         eq_(diffs, [])
 
+    @config.requirements.long_names
     def test_nothing_ix_changed_labels_were_truncated(self):
         m1 = MetaData(
             naming_convention={
@@ -365,6 +368,7 @@ class AutogenerateUniqueIndexTest(AutogenFixtureTest, TestBase):
         diffs = self._fixture(m1, m2, max_identifier_length=30)
         eq_(diffs, [])
 
+    @config.requirements.long_names
     def test_nothing_changed_uq_w_mixed_case_nconv_name(self):
         m1 = MetaData(
             naming_convention={
@@ -448,6 +452,7 @@ class AutogenerateUniqueIndexTest(AutogenFixtureTest, TestBase):
         diffs = self._fixture(m1, m2)
         eq_(diffs, [])
 
+    @config.requirements.long_names
     def test_nothing_changed_ix_w_mixed_case_nconv_name(self):
         m1 = MetaData(
             naming_convention={
@@ -687,6 +692,79 @@ class AutogenerateUniqueIndexTest(AutogenFixtureTest, TestBase):
         diffs = self._fixture(m1, m2)
         eq_(diffs, [])
 
+    def test_ix_casing_convention_changed_so_put_drops_first(self):
+        m1 = MetaData()
+        m2 = MetaData()
+
+        ix1 = Index("SomeCasingConvention", "x")
+        Table(
+            "new_idx",
+            m1,
+            Column("id1", Integer, primary_key=True),
+            Column("x", String(20)),
+            ix1,
+        )
+
+        ix2 = Index("somecasingconvention", "x")
+        Table(
+            "new_idx",
+            m2,
+            Column("id1", Integer, primary_key=True),
+            Column("x", String(20)),
+            ix2,
+        )
+
+        diffs = self._fixture(m1, m2)
+
+        eq_(
+            [(d[0], d[1].name) for d in diffs],
+            [
+                ("remove_index", "SomeCasingConvention"),
+                ("add_index", "somecasingconvention"),
+            ],
+        )
+
+    def test_uq_casing_convention_changed_so_put_drops_first(self):
+        m1 = MetaData()
+        m2 = MetaData()
+
+        uq1 = UniqueConstraint("x", name="SomeCasingConvention")
+        Table(
+            "new_idx",
+            m1,
+            Column("id1", Integer, primary_key=True),
+            Column("x", String(20)),
+            uq1,
+        )
+
+        uq2 = UniqueConstraint("x", name="somecasingconvention")
+        Table(
+            "new_idx",
+            m2,
+            Column("id1", Integer, primary_key=True),
+            Column("x", String(20)),
+            uq2,
+        )
+
+        diffs = self._fixture(m1, m2)
+
+        if self.reports_unique_constraints_as_indexes:
+            eq_(
+                [(d[0], d[1].name) for d in diffs],
+                [
+                    ("remove_index", "SomeCasingConvention"),
+                    ("add_constraint", "somecasingconvention"),
+                ],
+            )
+        else:
+            eq_(
+                [(d[0], d[1].name) for d in diffs],
+                [
+                    ("remove_constraint", "SomeCasingConvention"),
+                    ("add_constraint", "somecasingconvention"),
+                ],
+            )
+
     def test_new_idx_index_named_as_column(self):
         m1 = MetaData()
         m2 = MetaData()
@@ -821,7 +899,12 @@ class AutogenerateUniqueIndexTest(AutogenFixtureTest, TestBase):
         diffs = self._fixture(m1, m2)
 
         diffs = set(
-            (cmd, ("x" in obj.name) if obj.name is not None else False)
+            (
+                cmd,
+                isinstance(obj, (UniqueConstraint, Index))
+                if obj.name is not None
+                else False,
+            )
             for cmd, obj in diffs
         )
         if self.reports_unnamed_constraints:
@@ -934,6 +1017,7 @@ class AutogenerateUniqueIndexTest(AutogenFixtureTest, TestBase):
 
         eq_(diffs[0][0], "add_index")
 
+    @config.requirements.reflects_indexes_w_sorting
     def test_unchanged_idx_non_col(self):
         m1 = MetaData()
         m2 = MetaData()
@@ -1179,7 +1263,7 @@ class PGUniqueIndexTest(AutogenerateUniqueIndexTest):
 class MySQLUniqueIndexTest(AutogenerateUniqueIndexTest):
     reports_unnamed_constraints = True
     reports_unique_constraints_as_indexes = True
-    __only_on__ = "mysql"
+    __only_on__ = "mysql", "mariadb"
     __backend__ = True
 
     def test_removed_idx_index_named_as_column(self):
@@ -1203,6 +1287,11 @@ class OracleUniqueIndexTest(AutogenerateUniqueIndexTest):
 class NoUqReflectionIndexTest(NoUqReflection, AutogenerateUniqueIndexTest):
     reports_unique_constraints = False
     __only_on__ = "sqlite"
+
+    def test_uq_casing_convention_changed_so_put_drops_first(self):
+        config.skip_test(
+            "unique constraint reflection disabled for this suite"
+        )
 
     def test_unique_not_reported(self):
         m1 = MetaData()
@@ -1308,7 +1397,8 @@ class NoUqReportsIndAsUqTest(NoUqReflectionIndexTest):
 class IncludeHooksTest(AutogenFixtureTest, TestBase):
     __backend__ = True
 
-    def test_remove_connection_index(self):
+    @combinations(("name",), ("object",))
+    def test_remove_connection_index(self, hook_type):
         m1 = MetaData()
         m2 = MetaData()
 
@@ -1318,25 +1408,59 @@ class IncludeHooksTest(AutogenFixtureTest, TestBase):
 
         Table("t", m2, Column("x", Integer), Column("y", Integer))
 
-        def include_object(object_, name, type_, reflected, compare_to):
-            if type_ == "unique_constraint":
-                return False
-            return not (
-                isinstance(object_, Index)
-                and type_ == "index"
-                and reflected
-                and name == "ix1"
-            )
+        if hook_type == "object":
 
-        diffs = self._fixture(m1, m2, object_filters=include_object)
+            def include_object(object_, name, type_, reflected, compare_to):
+                if type_ == "unique_constraint":
+                    return False
+                return not (
+                    isinstance(object_, Index)
+                    and type_ == "index"
+                    and reflected
+                    and name == "ix1"
+                )
+
+            diffs = self._fixture(m1, m2, object_filters=include_object)
+        elif hook_type == "name":
+            all_names = set()
+
+            def include_name(name, type_, parent_names):
+                all_names.add((name, type_))
+                if name == "ix1":
+                    eq_(type_, "index")
+                    eq_(
+                        parent_names,
+                        {
+                            "table_name": "t",
+                            "schema_name": None,
+                            "schema_qualified_table_name": "t",
+                        },
+                    )
+                    return False
+                else:
+                    return True
+
+            diffs = self._fixture(m1, m2, name_filters=include_name)
+            eq_(
+                all_names,
+                {
+                    ("ix1", "index"),
+                    ("ix2", "index"),
+                    ("y", "column"),
+                    ("t", "table"),
+                    (None, "schema"),
+                    ("x", "column"),
+                },
+            )
 
         eq_(diffs[0][0], "remove_index")
         eq_(diffs[0][1].name, "ix2")
         eq_(len(diffs), 1)
 
+    @combinations(("name",), ("object",))
     @config.requirements.unique_constraint_reflection
     @config.requirements.reflects_unique_constraints_unambiguously
-    def test_remove_connection_uq(self):
+    def test_remove_connection_uq(self, hook_type):
         m1 = MetaData()
         m2 = MetaData()
 
@@ -1351,17 +1475,53 @@ class IncludeHooksTest(AutogenFixtureTest, TestBase):
 
         Table("t", m2, Column("x", Integer), Column("y", Integer))
 
-        def include_object(object_, name, type_, reflected, compare_to):
-            if type_ == "index":
-                return False
-            return not (
-                isinstance(object_, UniqueConstraint)
-                and type_ == "unique_constraint"
-                and reflected
-                and name == "uq1"
-            )
+        if hook_type == "object":
 
-        diffs = self._fixture(m1, m2, object_filters=include_object)
+            def include_object(object_, name, type_, reflected, compare_to):
+                if type_ == "index":
+                    return False
+                return not (
+                    isinstance(object_, UniqueConstraint)
+                    and type_ == "unique_constraint"
+                    and reflected
+                    and name == "uq1"
+                )
+
+            diffs = self._fixture(m1, m2, object_filters=include_object)
+        elif hook_type == "name":
+            all_names = set()
+
+            def include_name(name, type_, parent_names):
+                if type_ == "index":
+                    return False  # PostgreSQL thing
+
+                all_names.add((name, type_))
+
+                if name == "uq1":
+                    eq_(type_, "unique_constraint")
+                    eq_(
+                        parent_names,
+                        {
+                            "table_name": "t",
+                            "schema_name": None,
+                            "schema_qualified_table_name": "t",
+                        },
+                    )
+                    return False
+                return True
+
+            diffs = self._fixture(m1, m2, name_filters=include_name)
+            eq_(
+                all_names,
+                {
+                    ("t", "table"),
+                    (None, "schema"),
+                    ("uq2", "unique_constraint"),
+                    ("x", "column"),
+                    ("y", "column"),
+                    ("uq1", "unique_constraint"),
+                },
+            )
 
         eq_(diffs[0][0], "remove_constraint")
         eq_(diffs[0][1].name, "uq2")
@@ -1508,7 +1668,7 @@ class IncludeHooksTest(AutogenFixtureTest, TestBase):
 
 class TruncatedIdxTest(AutogenFixtureTest, TestBase):
     def setUp(self):
-        self.bind = engines.testing_engine()
+        self.bind = util.testing_engine()
         self.bind.dialect.max_identifier_length = 30
 
     def test_idx_matches_long(self):

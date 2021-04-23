@@ -4,6 +4,468 @@ Changelog
 ==========
 
 .. changelog::
+    :version: 1.5.8
+    :released: March 23, 2021
+
+    .. change::
+        :tags: bug, environment
+        :tickets: 816
+
+        Fixed regression caused by SQLAlchemy 1.4 where the "alembic current"
+        command would fail due to changes in the ``URL`` object.
+
+
+.. changelog::
+    :version: 1.5.7
+    :released: March 11, 2021
+
+    .. change::
+        :tags: bug, autogenerate
+        :tickets: 813
+
+        Adjusted the recently added
+        :paramref:`.EnvironmentContext.configure.include_name` hook to accommodate
+        for additional object types such as "views" that don't have a parent table,
+        to support third party recipes and extensions. Pull request courtesy Oliver
+        Rice.
+
+.. changelog::
+    :version: 1.5.6
+    :released: March 5, 2021
+
+    .. change::
+        :tags: bug, mssql, operations
+        :tickets: 812
+
+        Fixed bug where the "existing_type" parameter, which the MSSQL dialect
+        requires in order to change the nullability of a column in the absence of
+        also changing the column type, would cause an ALTER COLUMN operation to
+        incorrectly render a second ALTER statement without the nullability if a
+        new type were also present, as the MSSQL-specific contract did not
+        anticipate all three of "nullability", "type_" and "existing_type" being
+        sent at the same time.
+
+
+    .. change::
+        :tags: template
+        :ticket: 805
+
+        Add async template to Alembic to bootstrap environments that use
+        async DBAPI. Updated the cookbook to include a migration guide
+        on how to adapt an existing enviroment for use with DBAPI drivers.
+
+.. changelog::
+    :version: 1.5.5
+    :released: February 20, 2021
+
+    .. change::
+        :tags: bug
+
+        Adjusted the use of SQLAlchemy's ".copy()" internals to use "._copy()"
+        for version 1.4.0, as this method is being renamed.
+
+    .. change::
+        :tags: bug, environment
+        :tickets: 797
+
+        Added new config file option ``prepend_sys_path``, which is a series of
+        paths that will be prepended to sys.path; the default value in newly
+        generated alembic.ini files is ".".  This fixes a long-standing issue
+        where for some reason running the alembic command line would not place the
+        local "." path in sys.path, meaning an application locally present in "."
+        and importable through normal channels, e.g. python interpreter, pytest,
+        etc. would not be located by Alembic, even though the ``env.py`` file is
+        loaded relative to the current path when ``alembic.ini`` contains a
+        relative path. To enable for existing installations, add the option to the
+        alembic.ini file as follows::
+
+          # sys.path path, will be prepended to sys.path if present.
+          # defaults to the current working directory.
+          prepend_sys_path = .
+
+        .. seealso::
+
+            :ref:`installation` - updated documentation reflecting that local
+            installation of the project is not necessary if running the Alembic cli
+            from the local path.
+
+
+.. changelog::
+    :version: 1.5.4
+    :released: February 3, 2021
+
+    .. change::
+        :tags: bug, versioning
+        :tickets: 789
+
+        Fixed bug in versioning model where a downgrade across a revision with a
+        dependency on another branch, yet an ancestor is also dependent on that
+        branch, would produce an erroneous state in the alembic_version table,
+        making upgrades impossible without manually repairing the table.
+
+.. changelog::
+    :version: 1.5.3
+    :released: January 29, 2021
+
+    .. change::
+        :tags: bug, autogenerate
+        :tickets: 786
+
+        Changed the default ordering of "CREATE" and "DROP" statements indexes and
+        unique constraints within the autogenerate process, so that for example in
+        an upgrade() operation, a particular index or constraint that is to be
+        replaced such as for a casing convention change will not produce any naming
+        conflicts. For foreign key constraint objects, this is already how
+        constraints are ordered, and for table objects, users would normally want
+        to use :meth:`.Operations.rename_table` in any case.
+
+    .. change::
+        :tags: bug, autogenerate, mssql
+        :tickets: 787
+
+        Fixed assorted autogenerate issues with SQL Server:
+
+        * ignore default reflected identity on primary_key columns
+        * improve server default comparison
+
+    .. change::
+        :tags: bug, mysql, autogenerate
+        :tickets: 788
+
+        Fixed issue where autogenerate rendering of ``op.alter_column()`` would
+        fail to include MySQL ``existing_nullable=False`` if the column were part
+        of a primary key constraint within the table metadata.
+
+.. changelog::
+    :version: 1.5.2
+    :released: January 20, 2021
+
+    .. change::
+        :tags: bug, versioning, regression
+        :tickets: 784
+
+        Fixed regression where new "loop detection" feature introduced in
+        :ticket:`757` produced false positives for revision names that have
+        overlapping substrings between revision number and down revision and/or
+        dependency, if the downrev/dependency were not in sequence form.
+
+    .. change::
+        :tags: bug, environment
+        :tickets: 782
+
+        Fixed regression where Alembic would fail to create a transaction properly
+        if the :class:`sqlalchemy.engine.Connection` were a so-called "branched"
+        connection, that is, one where the ``.connect()`` method had been called to
+        create a "sub" connection.
+
+.. changelog::
+    :version: 1.5.1
+    :released: January 19, 2021
+
+    .. change::
+        :tags: bug, installation, commands
+        :tickets: 780
+
+        Fixed installation issue where the "templates" directory was not being
+        installed, preventing commands like "list_templates" and "init" from
+        working.
+
+.. changelog::
+    :version: 1.5.0
+    :released: January 18, 2021
+
+    .. change::
+        :tags: usecase, operations
+        :tickets: 730
+
+        Added support for rendering of "identity" elements on
+        :class:`.Column` objects, supported in SQLAlchemy via
+        the :class:`.Identity` element introduced in version 1.4.
+
+        Adding columns with identity is supported on PostgreSQL,
+        MSSQL and Oracle. Changing the identity options or removing
+        it is supported only on PostgreSQL and Oracle.
+
+    .. change::
+        :tags: changed, environment
+
+        To accommodate SQLAlchemy 1.4 and 2.0, the migration model now no longer
+        assumes that the SQLAlchemy Connection will autocommit an individual
+        operation.   This essentially means that for databases that use
+        non-transactional DDL (pysqlite current driver behavior, MySQL), there is
+        still a BEGIN/COMMIT block that will surround each individual migration.
+        Databases that support transactional DDL should continue to have the
+        same flow, either per migration or per-entire run, depending on the
+        value of the :paramref:`.Environment.configure.transaction_per_migration`
+        flag.
+
+
+    .. change::
+        :tags: changed, environment
+
+        A :class:`.CommandError` is raised if a ``sqlalchemy.engine.Engine`` is
+        passed to the :meth:`.MigrationContext.configure` method instead of a
+        ``sqlalchemy.engine.Connection`` object.  Previously, this would be a
+        warning only.
+
+    .. change::
+        :tags: bug, operations
+        :tickets: 753
+
+        Modified the ``add_column()`` operation such that the ``Column`` object in
+        use is shallow copied to a new instance if that ``Column`` is already
+        attached to a ``table()`` or ``Table``. This accommodates for the change
+        made in SQLAlchemy issue #5618 which prohibits a ``Column`` from being
+        associated with multiple ``table()`` objects. This resumes support for
+        using a ``Column`` inside of an Alembic operation that already refers to a
+        parent ``table()`` or ``Table`` as well as allows operation objects just
+        autogenerated to work.
+
+    .. change::
+        :tags: feature, autogenerate
+        :tickets: 650
+
+        Added new hook :paramref:`.EnvironmentContext.configure.include_name`,
+        which complements the
+        :paramref:`.EnvironmentContext.configure.include_object` hook by providing
+        a means of preventing objects of a certain name from being autogenerated
+        **before** the SQLAlchemy reflection process takes place, and notably
+        includes explicit support for passing each schema name when
+        :paramref:`.EnvironmentContext.configure.include_schemas` is set to True.
+        This is most important especially for enviroments that make use of
+        :paramref:`.EnvironmentContext.configure.include_schemas` where schemas are
+        actually databases (e.g. MySQL) in order to prevent reflection sweeps of
+        the entire server.
+
+        .. seealso::
+
+            :ref:`autogenerate_include_hooks` - new documentation section
+
+    .. change::
+        :tags: removed, autogenerate
+
+        The long deprecated
+        :paramref:`.EnvironmentContext.configure.include_symbol` hook is removed.
+        The  :paramref:`.EnvironmentContext.configure.include_object`
+        and  :paramref:`.EnvironmentContext.configure.include_name`
+        hooks both achieve the goals of this hook.
+
+
+    .. change::
+        :tags: bug, autogenerate
+        :tickets: 721
+
+        Added rendering for the ``Table.prefixes`` element to autogenerate so that
+        the rendered Python code includes these directives. Pull request courtesy
+        Rodrigo Ce Moretto.
+
+    .. change::
+        :tags: bug, batch
+        :tickets: 761
+
+        Added missing "create comment" feature for columns that are altered in
+        batch migrations.
+
+
+    .. change::
+        :tags: changed
+        :tickets: 748
+
+        Alembic 1.5.0 now supports **Python 2.7 and Python 3.6 and above**, as well
+        as **SQLAlchemy 1.3.0 and above**.  Support is removed for Python 3
+        versions prior to 3.6 and SQLAlchemy versions prior to the 1.3 series.
+
+    .. change::
+        :tags: bug, batch
+        :tickets: 773
+
+        Made an adjustment to the PostgreSQL dialect to allow it to work more
+        effectively in batch mode, where a datatype like Boolean or non-native Enum
+        that may have embedded rules to generate CHECK constraints will be more
+        correctly handled in that these constraints usually will not have been
+        generated on the PostgreSQL backend; previously it would inadvertently
+        assume they existed unconditionally in a special PG-only "drop constraint"
+        step.
+
+
+    .. change::
+        :tags: feature, versioning
+        :tickets: 757
+
+        The revision tree is now checked for cycles and loops between revision
+        files when the revision environment is loaded up.  Scenarios such as a
+        revision pointing to itself, or a revision that can reach itself via a
+        loop, are handled and will raise the :class:`.CycleDetected` exception when
+        the environment is loaded (expressed from the Alembic commandline as a
+        failure message and nonzero return code). Previously, these situations were
+        silently ignored up front, and the behavior of revision traversal would
+        either be silently incorrect, or would produce errors such as
+        :class:`.RangeNotAncestorError`.  Pull request courtesy Koichiro Den.
+
+
+    .. change::
+        :tags: usecase, commands
+
+        Add ``__main__.py`` file to alembic package to support invocation
+        with ``python -m alembic``.
+
+    .. change::
+        :tags: removed, commands
+
+        Removed deprecated ``--head_only`` option to the ``alembic current``
+        command
+
+    .. change::
+        :tags: removed, operations
+
+        Removed legacy parameter names from operations, these have been emitting
+        warnings since version 0.8.  In the case that legacy version files have not
+        yet been updated, these can be modified directly in order to maintain
+        compatibility:
+
+        * :meth:`.Operations.drop_constraint` - "type" (use "type_") and "name"
+          (use "constraint_name")
+
+        * :meth:`.Operations.create_primary_key` - "cols" (use "columns") and
+          "name" (use "constraint_name")
+
+        * :meth:`.Operations.create_unique_constraint` - "name" (use
+          "constraint_name"), "source" (use "table_name") and "local_cols" (use
+          "columns")
+
+        * :meth:`.Operations.batch_create_unique_constraint` - "name" (use
+          "constraint_name")
+
+        * :meth:`.Operations.create_foreign_key` - "name" (use "constraint_name"),
+          "source" (use "source_table"), "referent" (use "referent_table")
+
+        * :meth:`.Operations.batch_create_foreign_key` - "name" (use
+          "constraint_name"), "referent" (use "referent_table")
+
+        * :meth:`.Operations.create_check_constraint` - "name" (use
+          "constraint_name"), "source" (use "table_name")
+
+        * :meth:`.Operations.batch_create_check_constraint` - "name" (use
+          "constraint_name")
+
+        * :meth:`.Operations.create_index` - "name" (use "index_name")
+
+        * :meth:`.Operations.drop_index` - "name" (use "index_name"), "tablename"
+          (use "table_name")
+
+        * :meth:`.Operations.batch_drop_index` - "name" (use "index_name"),
+
+        * :meth:`.Operations.create_table` - "name" (use "table_name")
+
+        * :meth:`.Operations.drop_table` - "name" (use "table_name")
+
+        * :meth:`.Operations.alter_column` - "name" (use "new_column_name")
+
+
+
+.. changelog::
+    :version: 1.4.3
+    :released: September 11, 2020
+
+    .. change::
+        :tags: bug, sqlite, batch
+        :tickets: 711
+
+        Added support to drop named CHECK constraints that are specified as part of
+        a column, rather than table wide.  Previously, only constraints associated
+        with the table were considered.
+
+    .. change::
+        :tags: bug, ops, mysql
+        :tickets: 736
+
+        Fixed issue where the MySQL dialect would not correctly render the server
+        default of a column in an alter operation, if the operation were
+        programmatically generated from an autogenerate pass as it would not
+        accommodate for the full structure of the DefaultClause construct.
+
+    .. change::
+        :tags: bug, sqlite, batch
+        :tickets: 697
+
+        Fixed issue where the CAST applied to a JSON column when copying a SQLite
+        table during batch mode would cause the data to be lost, as SQLite's CAST
+        with JSON appears to convert the data to the value "0". The CAST is now
+        skipped in a dialect-specific manner, including for JSON columns on SQLite.
+        Pull request courtesy Sebastián Ramírez.
+
+    .. change::
+        :tags: bug, commands
+        :tickets: 694
+
+        The ``alembic current`` command no longer creates an ``alembic_version``
+        table in the database if one does not exist already, returning no version
+        as the current version. This allows checking for migrations in parallel
+        without introducing race conditions.  Pull request courtesy Nikolay
+        Edigaryev.
+
+
+    .. change::
+        :tags: bug, batch
+
+        Fixed issue where columns in a foreign-key referenced table would be
+        replaced with null-type columns during a batch operation; while this did
+        not generally have any side effects, it could theoretically impact a batch
+        operation that also targets that table directly and also would interfere
+        with future changes to the ``.append_column()`` method to disallow implicit
+        replacement of columns.
+
+    .. change::
+       :tags: bug, mssql
+       :tickets: 716
+
+       Fixed issue where the ``mssql_drop_foreign_key=True`` flag on
+       ``op.drop_column`` would lead to incorrect syntax error due to a typo in the
+       SQL emitted, same typo was present in the test as well so it was not
+       detected. Pull request courtesy Oleg Shigorin.
+
+.. changelog::
+    :version: 1.4.2
+    :released: March 19, 2020
+
+    .. change::
+        :tags: usecase, autogenerate
+        :tickets: 669
+
+        Adjusted autogen comparison to accommodate for backends that support
+        computed column reflection, dependent on SQLAlchemy version 1.3.16 or
+        higher. This emits a warning if the SQL expression inside of a
+        :class:`.Computed` value changes between the metadata and the database, as
+        these expressions can't be changed without dropping and recreating the
+        column.
+
+
+    .. change::
+        :tags: bug, tests
+        :tickets: 668
+
+        Fixed an issue that prevented the test suite from running with the
+        recently released py.test 5.4.0.
+
+
+    .. change::
+        :tags: bug, autogenerate, mysql
+        :tickets: 671
+
+        Fixed more false-positive failures produced by the new "compare type" logic
+        first added in :ticket:`605`, particularly impacting MySQL string types
+        regarding flags such as "charset" and "collation".
+
+    .. change::
+        :tags: bug, op directives, oracle
+        :tickets: 670
+
+        Fixed issue in Oracle backend where a table RENAME with a schema-qualified
+        name would include the schema in the "to" portion, which is rejected by
+        Oracle.
+
+
+.. changelog::
     :version: 1.4.1
     :released: March 1, 2020
 

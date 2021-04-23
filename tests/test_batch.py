@@ -13,17 +13,20 @@ from sqlalchemy import func
 from sqlalchemy import Index
 from sqlalchemy import inspect
 from sqlalchemy import Integer
+from sqlalchemy import JSON
 from sqlalchemy import MetaData
 from sqlalchemy import PrimaryKeyConstraint
 from sqlalchemy import String
 from sqlalchemy import Table
+from sqlalchemy import Text
 from sqlalchemy import UniqueConstraint
+from sqlalchemy.dialects import sqlite as sqlite_dialect
 from sqlalchemy.schema import CreateIndex
 from sqlalchemy.schema import CreateTable
 from sqlalchemy.sql import column
-from sqlalchemy.sql import select
 from sqlalchemy.sql import text
 
+from alembic.ddl import sqlite
 from alembic.operations import Operations
 from alembic.operations.batch import ApplyBatchImpl
 from alembic.runtime.migration import MigrationContext
@@ -31,16 +34,21 @@ from alembic.testing import assert_raises_message
 from alembic.testing import config
 from alembic.testing import eq_
 from alembic.testing import exclusions
+from alembic.testing import is_
 from alembic.testing import mock
 from alembic.testing import TestBase
 from alembic.testing.fixtures import op_fixture
 from alembic.util import exc as alembic_exc
+from alembic.util.sqla_compat import _select
 from alembic.util.sqla_compat import sqla_14
 
 
 class BatchApplyTest(TestBase):
     def setUp(self):
         self.op = Operations(mock.Mock(opts={}))
+        self.impl = sqlite.SQLiteImpl(
+            sqlite_dialect.dialect(), None, False, False, None, {}
+        )
 
     def _simple_fixture(self, table_args=(), table_kwargs={}, **kw):
         m = MetaData()
@@ -51,7 +59,9 @@ class BatchApplyTest(TestBase):
             Column("x", String(10)),
             Column("y", Integer),
         )
-        return ApplyBatchImpl(t, table_args, table_kwargs, False, **kw)
+        return ApplyBatchImpl(
+            self.impl, t, table_args, table_kwargs, False, **kw
+        )
 
     def _uq_fixture(self, table_args=(), table_kwargs={}):
         m = MetaData()
@@ -63,7 +73,30 @@ class BatchApplyTest(TestBase):
             Column("y", Integer),
             UniqueConstraint("y", name="uq1"),
         )
-        return ApplyBatchImpl(t, table_args, table_kwargs, False)
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
+
+    def _named_ck_table_fixture(self, table_args=(), table_kwargs={}):
+        m = MetaData()
+        t = Table(
+            "tname",
+            m,
+            Column("id", Integer, primary_key=True),
+            Column("x", String()),
+            Column("y", Integer),
+            CheckConstraint("y > 5", name="ck1"),
+        )
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
+
+    def _named_ck_col_fixture(self, table_args=(), table_kwargs={}):
+        m = MetaData()
+        t = Table(
+            "tname",
+            m,
+            Column("id", Integer, primary_key=True),
+            Column("x", String()),
+            Column("y", Integer, CheckConstraint("y > 5", name="ck1")),
+        )
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
 
     def _ix_fixture(self, table_args=(), table_kwargs={}):
         m = MetaData()
@@ -75,7 +108,7 @@ class BatchApplyTest(TestBase):
             Column("y", Integer),
             Index("ix1", "y"),
         )
-        return ApplyBatchImpl(t, table_args, table_kwargs, False)
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
 
     def _pk_fixture(self):
         m = MetaData()
@@ -87,7 +120,7 @@ class BatchApplyTest(TestBase):
             Column("y", Integer),
             PrimaryKeyConstraint("id", name="mypk"),
         )
-        return ApplyBatchImpl(t, (), {}, False)
+        return ApplyBatchImpl(self.impl, t, (), {}, False)
 
     def _literal_ck_fixture(
         self, copy_from=None, table_args=(), table_kwargs={}
@@ -103,7 +136,7 @@ class BatchApplyTest(TestBase):
                 Column("email", String()),
                 CheckConstraint("email LIKE '%@%'"),
             )
-        return ApplyBatchImpl(t, table_args, table_kwargs, False)
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
 
     def _sql_ck_fixture(self, table_args=(), table_kwargs={}):
         m = MetaData()
@@ -114,7 +147,7 @@ class BatchApplyTest(TestBase):
             Column("email", String()),
         )
         t.append_constraint(CheckConstraint(t.c.email.like("%@%")))
-        return ApplyBatchImpl(t, table_args, table_kwargs, False)
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
 
     def _fk_fixture(self, table_args=(), table_kwargs={}):
         m = MetaData()
@@ -125,7 +158,7 @@ class BatchApplyTest(TestBase):
             Column("email", String()),
             Column("user_id", Integer, ForeignKey("user.id")),
         )
-        return ApplyBatchImpl(t, table_args, table_kwargs, False)
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
 
     def _multi_fk_fixture(self, table_args=(), table_kwargs={}, schema=None):
         m = MetaData()
@@ -149,7 +182,7 @@ class BatchApplyTest(TestBase):
             ),
             schema=schema,
         )
-        return ApplyBatchImpl(t, table_args, table_kwargs, False)
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
 
     def _named_fk_fixture(self, table_args=(), table_kwargs={}):
         m = MetaData()
@@ -160,7 +193,7 @@ class BatchApplyTest(TestBase):
             Column("email", String()),
             Column("user_id", Integer, ForeignKey("user.id", name="ufk")),
         )
-        return ApplyBatchImpl(t, table_args, table_kwargs, False)
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
 
     def _selfref_fk_fixture(self, table_args=(), table_kwargs={}):
         m = MetaData()
@@ -171,7 +204,7 @@ class BatchApplyTest(TestBase):
             Column("parent_id", Integer, ForeignKey("tname.id")),
             Column("data", String),
         )
-        return ApplyBatchImpl(t, table_args, table_kwargs, False)
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
 
     def _boolean_fixture(self, table_args=(), table_kwargs={}):
         m = MetaData()
@@ -179,9 +212,9 @@ class BatchApplyTest(TestBase):
             "tname",
             m,
             Column("id", Integer, primary_key=True),
-            Column("flag", Boolean),
+            Column("flag", Boolean(create_constraint=True)),
         )
-        return ApplyBatchImpl(t, table_args, table_kwargs, False)
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
 
     def _boolean_no_ck_fixture(self, table_args=(), table_kwargs={}):
         m = MetaData()
@@ -191,7 +224,7 @@ class BatchApplyTest(TestBase):
             Column("id", Integer, primary_key=True),
             Column("flag", Boolean(create_constraint=False)),
         )
-        return ApplyBatchImpl(t, table_args, table_kwargs, False)
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
 
     def _enum_fixture(self, table_args=(), table_kwargs={}):
         m = MetaData()
@@ -199,9 +232,9 @@ class BatchApplyTest(TestBase):
             "tname",
             m,
             Column("id", Integer, primary_key=True),
-            Column("thing", Enum("a", "b", "c")),
+            Column("thing", Enum("a", "b", "c", create_constraint=True)),
         )
-        return ApplyBatchImpl(t, table_args, table_kwargs, False)
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
 
     def _server_default_fixture(self, table_args=(), table_kwargs={}):
         m = MetaData()
@@ -211,7 +244,7 @@ class BatchApplyTest(TestBase):
             Column("id", Integer, primary_key=True),
             Column("thing", String(), server_default=""),
         )
-        return ApplyBatchImpl(t, table_args, table_kwargs, False)
+        return ApplyBatchImpl(self.impl, t, table_args, table_kwargs, False)
 
     def _assert_impl(
         self,
@@ -314,6 +347,18 @@ class BatchApplyTest(TestBase):
         impl.alter_column("tname", "x", name="q")
         new_table = self._assert_impl(impl)
         eq_(new_table.c.x.name, "q")
+
+    def test_alter_column_comment(self):
+        impl = self._simple_fixture()
+        impl.alter_column("tname", "x", comment="some comment")
+        new_table = self._assert_impl(impl)
+        eq_(new_table.c.x.comment, "some comment")
+
+    def test_add_column_comment(self):
+        impl = self._simple_fixture()
+        impl.add_column("tname", Column("q", Integer, comment="some comment"))
+        new_table = self._assert_impl(impl, colnames=["id", "x", "y", "q"])
+        eq_(new_table.c.q.comment, "some comment")
 
     def test_rename_col_boolean(self):
         impl = self._boolean_fixture()
@@ -628,6 +673,21 @@ class BatchApplyTest(TestBase):
             schema="foo_schema",
         )
 
+    def test_do_not_add_existing_columns_columns(self):
+        impl = self._multi_fk_fixture()
+        meta = impl.table.metadata
+
+        cid = Column("id", Integer())
+        user = Table("user", meta, cid)
+
+        fk = [
+            c
+            for c in impl.unnamed_constraints
+            if isinstance(c, ForeignKeyConstraint)
+        ]
+        impl._setup_referent(meta, fk[0])
+        is_(user.c.id, cid)
+
     def test_drop_col(self):
         impl = self._simple_fixture()
         impl.drop_column("tname", column("x"))
@@ -722,6 +782,39 @@ class BatchApplyTest(TestBase):
             ddl_not_contains="CONSTRAINT uq1 UNIQUE",
         )
 
+    def test_add_ck(self):
+        impl = self._simple_fixture()
+        ck = self.op.schema_obj.check_constraint("ck1", "tname", "y > 5")
+
+        impl.add_constraint(ck)
+        self._assert_impl(
+            impl,
+            colnames=["id", "x", "y"],
+            ddl_contains="CONSTRAINT ck1 CHECK (y > 5)",
+        )
+
+    def test_drop_ck_table(self):
+        impl = self._named_ck_table_fixture()
+
+        ck = self.op.schema_obj.check_constraint("ck1", "tname", "y > 5")
+        impl.drop_constraint(ck)
+        self._assert_impl(
+            impl,
+            colnames=["id", "x", "y"],
+            ddl_not_contains="CONSTRAINT ck1 CHECK (y > 5)",
+        )
+
+    def test_drop_ck_col(self):
+        impl = self._named_ck_col_fixture()
+
+        ck = self.op.schema_obj.check_constraint("ck1", "tname", "y > 5")
+        impl.drop_constraint(ck)
+        self._assert_impl(
+            impl,
+            colnames=["id", "x", "y"],
+            ddl_not_contains="CONSTRAINT ck1 CHECK (y > 5)",
+        )
+
     def test_create_index(self):
         impl = self._simple_fixture()
         ix = self.op.schema_obj.index("ix1", "tname", ["y"])
@@ -758,8 +851,10 @@ class BatchApplyTest(TestBase):
 class BatchAPITest(TestBase):
     @contextmanager
     def _fixture(self, schema=None):
+
         migration_context = mock.Mock(
-            opts={}, impl=mock.MagicMock(__dialect__="sqlite")
+            opts={},
+            impl=mock.MagicMock(__dialect__="sqlite", connection=object()),
         )
         op = Operations(migration_context)
         batch = op.batch_alter_table(
@@ -984,18 +1079,28 @@ class CopyFromTest(TestBase):
         self.op = Operations(context)
         return context
 
+    @config.requirements.sqlalchemy_13
     def test_change_type(self):
         context = self._fixture()
+        self.table.append_column(Column("toj", Text))
+        self.table.append_column(Column("fromj", JSON))
         with self.op.batch_alter_table(
             "foo", copy_from=self.table
         ) as batch_op:
             batch_op.alter_column("data", type_=Integer)
+            batch_op.alter_column("toj", type_=JSON)
+            batch_op.alter_column("fromj", type_=Text)
         context.assert_(
             "CREATE TABLE _alembic_tmp_foo (id INTEGER NOT NULL, "
-            "data INTEGER, x INTEGER, PRIMARY KEY (id))",
-            "INSERT INTO _alembic_tmp_foo (id, data, x) SELECT foo.id, "
-            "CAST(foo.data AS INTEGER) AS %s, foo.x FROM foo"
-            % (("data" if sqla_14 else "anon_1"),),
+            "data INTEGER, x INTEGER, toj JSON, fromj TEXT, PRIMARY KEY (id))",
+            "INSERT INTO _alembic_tmp_foo (id, data, x, toj, fromj) "
+            "SELECT foo.id, "
+            "CAST(foo.data AS INTEGER) AS %s, foo.x, foo.toj, "
+            "CAST(foo.fromj AS TEXT) AS %s FROM foo"
+            % (
+                ("data" if sqla_14 else "anon_1"),
+                ("fromj" if sqla_14 else "anon_2"),
+            ),
             "DROP TABLE foo",
             "ALTER TABLE _alembic_tmp_foo RENAME TO foo",
         )
@@ -1153,90 +1258,105 @@ class BatchRoundTripTest(TestBase):
             Column("x", Integer),
             mysql_engine="InnoDB",
         )
-        t1.create(self.conn)
+        with self.conn.begin():
+            t1.create(self.conn)
 
-        self.conn.execute(
-            t1.insert(),
-            [
-                {"id": 1, "data": "d1", "x": 5},
-                {"id": 2, "data": "22", "x": 6},
-                {"id": 3, "data": "8.5", "x": 7},
-                {"id": 4, "data": "9.46", "x": 8},
-                {"id": 5, "data": "d5", "x": 9},
-            ],
-        )
+            self.conn.execute(
+                t1.insert(),
+                [
+                    {"id": 1, "data": "d1", "x": 5},
+                    {"id": 2, "data": "22", "x": 6},
+                    {"id": 3, "data": "8.5", "x": 7},
+                    {"id": 4, "data": "9.46", "x": 8},
+                    {"id": 5, "data": "d5", "x": 9},
+                ],
+            )
         context = MigrationContext.configure(self.conn)
         self.op = Operations(context)
 
     @contextmanager
     def _sqlite_referential_integrity(self):
-        self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.exec_driver_sql("PRAGMA foreign_keys=ON")
         try:
             yield
         finally:
-            self.conn.execute("PRAGMA foreign_keys=OFF")
+            self.conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+
+            # as these tests are typically intentional fails, clean out
+            # tables left over
+            m = MetaData()
+            m.reflect(self.conn)
+            with self.conn.begin():
+                m.drop_all(self.conn)
 
     def _no_pk_fixture(self):
-        nopk = Table(
-            "nopk",
-            self.metadata,
-            Column("a", Integer),
-            Column("b", Integer),
-            Column("c", Integer),
-            mysql_engine="InnoDB",
-        )
-        nopk.create(self.conn)
-        self.conn.execute(
-            nopk.insert(), [{"a": 1, "b": 2, "c": 3}, {"a": 2, "b": 4, "c": 5}]
-        )
-        return nopk
+        with self.conn.begin():
+            nopk = Table(
+                "nopk",
+                self.metadata,
+                Column("a", Integer),
+                Column("b", Integer),
+                Column("c", Integer),
+                mysql_engine="InnoDB",
+            )
+            nopk.create(self.conn)
+            self.conn.execute(
+                nopk.insert(),
+                [{"a": 1, "b": 2, "c": 3}, {"a": 2, "b": 4, "c": 5}],
+            )
+            return nopk
 
     def _table_w_index_fixture(self):
-        t = Table(
-            "t_w_ix",
-            self.metadata,
-            Column("id", Integer, primary_key=True),
-            Column("thing", Integer),
-            Column("data", String(20)),
-        )
-        Index("ix_thing", t.c.thing)
-        t.create(self.conn)
-        return t
+        with self.conn.begin():
+            t = Table(
+                "t_w_ix",
+                self.metadata,
+                Column("id", Integer, primary_key=True),
+                Column("thing", Integer),
+                Column("data", String(20)),
+            )
+            Index("ix_thing", t.c.thing)
+            t.create(self.conn)
+            return t
 
     def _boolean_fixture(self):
-        t = Table(
-            "hasbool",
-            self.metadata,
-            Column("x", Boolean(create_constraint=True, name="ck1")),
-            Column("y", Integer),
-        )
-        t.create(self.conn)
+        with self.conn.begin():
+            t = Table(
+                "hasbool",
+                self.metadata,
+                Column("x", Boolean(create_constraint=True, name="ck1")),
+                Column("y", Integer),
+            )
+            t.create(self.conn)
 
     def _timestamp_fixture(self):
-        t = Table("hasts", self.metadata, Column("x", DateTime()))
-        t.create(self.conn)
-        return t
+        with self.conn.begin():
+            t = Table("hasts", self.metadata, Column("x", DateTime()))
+            t.create(self.conn)
+            return t
 
     def _datetime_server_default_fixture(self):
         return func.datetime("now", "localtime")
 
     def _timestamp_w_expr_default_fixture(self):
-        t = Table(
-            "hasts",
-            self.metadata,
-            Column(
-                "x",
-                DateTime(),
-                server_default=self._datetime_server_default_fixture(),
-                nullable=False,
-            ),
-        )
-        t.create(self.conn)
-        return t
+        with self.conn.begin():
+            t = Table(
+                "hasts",
+                self.metadata,
+                Column(
+                    "x",
+                    DateTime(),
+                    server_default=self._datetime_server_default_fixture(),
+                    nullable=False,
+                ),
+            )
+            t.create(self.conn)
+            return t
 
     def _int_to_boolean_fixture(self):
-        t = Table("hasbool", self.metadata, Column("x", Integer))
-        t.create(self.conn)
+        with self.conn.begin():
+            t = Table("hasbool", self.metadata, Column("x", Integer))
+            t.create(self.conn)
 
     def test_change_type_boolean_to_int(self):
         self._boolean_fixture()
@@ -1262,19 +1382,19 @@ class BatchRoundTripTest(TestBase):
 
         import datetime
 
-        self.conn.execute(
-            t.insert(), {"x": datetime.datetime(2012, 5, 18, 15, 32, 5)}
-        )
+        with self.conn.begin():
+            self.conn.execute(
+                t.insert(), {"x": datetime.datetime(2012, 5, 18, 15, 32, 5)}
+            )
 
         with self.op.batch_alter_table("hasts") as batch_op:
             batch_op.alter_column("x", type_=DateTime())
 
         eq_(
-            self.conn.execute(select([t.c.x])).fetchall(),
+            self.conn.execute(_select(t.c.x)).fetchall(),
             [(datetime.datetime(2012, 5, 18, 15, 32, 5),)],
         )
 
-    @config.requirements.sqlalchemy_12
     def test_no_net_change_timestamp_w_default(self):
         t = self._timestamp_w_expr_default_fixture()
 
@@ -1286,10 +1406,14 @@ class BatchRoundTripTest(TestBase):
                 server_default=self._datetime_server_default_fixture(),
             )
 
-        self.conn.execute(t.insert())
-
-        row = self.conn.execute(select([t.c.x])).fetchone()
-        assert row["x"] is not None
+        with self.conn.begin():
+            self.conn.execute(t.insert())
+        res = self.conn.execute(_select(t.c.x))
+        if sqla_14:
+            assert res.scalar_one_or_none() is not None
+        else:
+            row = res.fetchone()
+            assert row["x"] is not None
 
     def test_drop_col_schematype(self):
         self._boolean_fixture()
@@ -1327,17 +1451,18 @@ class BatchRoundTripTest(TestBase):
             )
 
     def tearDown(self):
-        self.metadata.drop_all(self.conn)
+        in_t = getattr(self.conn, "in_transaction", lambda: False)
+        if in_t():
+            self.conn.rollback()
+        with self.conn.begin():
+            self.metadata.drop_all(self.conn)
         self.conn.close()
 
     def _assert_data(self, data, tablename="foo"):
-        eq_(
-            [
-                dict(row)
-                for row in self.conn.execute("select * from %s" % tablename)
-            ],
-            data,
-        )
+        res = self.conn.execute(text("select * from %s" % tablename))
+        if sqla_14:
+            res = res.mappings()
+        eq_([dict(row) for row in res], data)
 
     def test_ix_existing(self):
         self._table_w_index_fixture()
@@ -1382,8 +1507,9 @@ class BatchRoundTripTest(TestBase):
             Column("foo_id", Integer, ForeignKey("foo.id")),
             mysql_engine="InnoDB",
         )
-        bar.create(self.conn)
-        self.conn.execute(bar.insert(), {"id": 1, "foo_id": 3})
+        with self.conn.begin():
+            bar.create(self.conn)
+            self.conn.execute(bar.insert(), {"id": 1, "foo_id": 3})
 
         with self.op.batch_alter_table("foo", recreate=recreate) as batch_op:
             batch_op.alter_column(
@@ -1428,9 +1554,14 @@ class BatchRoundTripTest(TestBase):
             Column("data", String(50)),
             mysql_engine="InnoDB",
         )
-        bar.create(self.conn)
-        self.conn.execute(bar.insert(), {"id": 1, "data": "x", "bar_id": None})
-        self.conn.execute(bar.insert(), {"id": 2, "data": "y", "bar_id": 1})
+        with self.conn.begin():
+            bar.create(self.conn)
+            self.conn.execute(
+                bar.insert(), {"id": 1, "data": "x", "bar_id": None}
+            )
+            self.conn.execute(
+                bar.insert(), {"id": 2, "data": "y", "bar_id": 1}
+            )
 
         with self.op.batch_alter_table("bar", recreate=recreate) as batch_op:
             batch_op.alter_column(
@@ -1545,8 +1676,9 @@ class BatchRoundTripTest(TestBase):
             Column("foo_id", Integer, ForeignKey("foo.id")),
             mysql_engine="InnoDB",
         )
-        bar.create(self.conn)
-        self.conn.execute(bar.insert(), {"id": 1, "foo_id": 3})
+        with self.conn.begin():
+            bar.create(self.conn)
+            self.conn.execute(bar.insert(), {"id": 1, "foo_id": 3})
 
         naming_convention = {
             "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s"
@@ -1571,6 +1703,82 @@ class BatchRoundTripTest(TestBase):
             ]
         )
 
+    def _assert_column_comment(self, tname, cname, comment):
+        insp = inspect(config.db)
+
+        cols = {col["name"]: col for col in insp.get_columns(tname)}
+        eq_(cols[cname]["comment"], comment)
+
+    @config.requirements.comments
+    def test_add_column_comment(self):
+        with self.op.batch_alter_table("foo") as batch_op:
+            batch_op.add_column(Column("y", Integer, comment="some comment"))
+
+        self._assert_column_comment("foo", "y", "some comment")
+
+        self._assert_data(
+            [
+                {"id": 1, "data": "d1", "x": 5, "y": None},
+                {"id": 2, "data": "22", "x": 6, "y": None},
+                {"id": 3, "data": "8.5", "x": 7, "y": None},
+                {"id": 4, "data": "9.46", "x": 8, "y": None},
+                {"id": 5, "data": "d5", "x": 9, "y": None},
+            ]
+        )
+
+    @config.requirements.comments
+    def test_add_column_comment_recreate(self):
+        with self.op.batch_alter_table("foo", recreate="always") as batch_op:
+            batch_op.add_column(Column("y", Integer, comment="some comment"))
+
+        self._assert_column_comment("foo", "y", "some comment")
+
+        self._assert_data(
+            [
+                {"id": 1, "data": "d1", "x": 5, "y": None},
+                {"id": 2, "data": "22", "x": 6, "y": None},
+                {"id": 3, "data": "8.5", "x": 7, "y": None},
+                {"id": 4, "data": "9.46", "x": 8, "y": None},
+                {"id": 5, "data": "d5", "x": 9, "y": None},
+            ]
+        )
+
+    @config.requirements.comments
+    def test_alter_column_comment(self):
+        with self.op.batch_alter_table("foo") as batch_op:
+            batch_op.alter_column(
+                "x", existing_type=Integer(), comment="some comment"
+            )
+
+        self._assert_column_comment("foo", "x", "some comment")
+
+        self._assert_data(
+            [
+                {"id": 1, "data": "d1", "x": 5},
+                {"id": 2, "data": "22", "x": 6},
+                {"id": 3, "data": "8.5", "x": 7},
+                {"id": 4, "data": "9.46", "x": 8},
+                {"id": 5, "data": "d5", "x": 9},
+            ]
+        )
+
+    @config.requirements.comments
+    def test_alter_column_comment_recreate(self):
+        with self.op.batch_alter_table("foo", recreate="always") as batch_op:
+            batch_op.alter_column("x", comment="some comment")
+
+        self._assert_column_comment("foo", "x", "some comment")
+
+        self._assert_data(
+            [
+                {"id": 1, "data": "d1", "x": 5},
+                {"id": 2, "data": "22", "x": 6},
+                {"id": 3, "data": "8.5", "x": 7},
+                {"id": 4, "data": "9.46", "x": 8},
+                {"id": 5, "data": "d5", "x": 9},
+            ]
+        )
+
     def test_rename_column(self):
         with self.op.batch_alter_table("foo") as batch_op:
             batch_op.alter_column("x", new_column_name="y")
@@ -1590,12 +1798,13 @@ class BatchRoundTripTest(TestBase):
             "bar",
             self.metadata,
             Column("id", Integer, primary_key=True),
-            Column("flag", Boolean()),
+            Column("flag", Boolean(create_constraint=True)),
             mysql_engine="InnoDB",
         )
-        bar.create(self.conn)
-        self.conn.execute(bar.insert(), {"id": 1, "flag": True})
-        self.conn.execute(bar.insert(), {"id": 2, "flag": False})
+        with self.conn.begin():
+            bar.create(self.conn)
+            self.conn.execute(bar.insert(), {"id": 1, "flag": True})
+            self.conn.execute(bar.insert(), {"id": 2, "flag": False})
 
         with self.op.batch_alter_table("bar") as batch_op:
             batch_op.alter_column(
@@ -1615,15 +1824,16 @@ class BatchRoundTripTest(TestBase):
             Column("flag", Boolean(create_constraint=False)),
             mysql_engine="InnoDB",
         )
-        bar.create(self.conn)
-        self.conn.execute(bar.insert(), {"id": 1, "flag": True})
-        self.conn.execute(bar.insert(), {"id": 2, "flag": False})
-        self.conn.execute(
-            # override Boolean type which as of 1.1 coerces numerics
-            # to 1/0
-            text("insert into bar (id, flag) values (:id, :flag)"),
-            {"id": 3, "flag": 5},
-        )
+        with self.conn.begin():
+            bar.create(self.conn)
+            self.conn.execute(bar.insert(), {"id": 1, "flag": True})
+            self.conn.execute(bar.insert(), {"id": 2, "flag": False})
+            self.conn.execute(
+                # override Boolean type which as of 1.1 coerces numerics
+                # to 1/0
+                text("insert into bar (id, flag) values (:id, :flag)"),
+                {"id": 3, "flag": 5},
+            )
 
         with self.op.batch_alter_table(
             "bar",
@@ -1803,7 +2013,7 @@ class BatchRoundTripTest(TestBase):
 
 
 class BatchRoundTripMySQLTest(BatchRoundTripTest):
-    __only_on__ = "mysql"
+    __only_on__ = "mysql", "mariadb"
     __backend__ = True
 
     def _datetime_server_default_fixture(self):
@@ -1839,11 +2049,9 @@ class BatchRoundTripMySQLTest(BatchRoundTripTest):
     def test_rename_column_boolean(self):
         super(BatchRoundTripMySQLTest, self).test_rename_column_boolean()
 
-    @config.requirements.mysql_check_reflection_or_none
     def test_change_type_boolean_to_int(self):
         super(BatchRoundTripMySQLTest, self).test_change_type_boolean_to_int()
 
-    @config.requirements.mysql_check_reflection_or_none
     def test_change_type_int_to_boolean(self):
         super(BatchRoundTripMySQLTest, self).test_change_type_int_to_boolean()
 
@@ -1851,6 +2059,21 @@ class BatchRoundTripMySQLTest(BatchRoundTripTest):
 class BatchRoundTripPostgresqlTest(BatchRoundTripTest):
     __only_on__ = "postgresql"
     __backend__ = True
+
+    def _native_boolean_fixture(self):
+        t = Table(
+            "has_native_bool",
+            self.metadata,
+            Column(
+                "x",
+                Boolean(create_constraint=True),
+                server_default="false",
+                nullable=False,
+            ),
+            Column("y", Integer),
+        )
+        with self.conn.begin():
+            t.create(self.conn)
 
     def _datetime_server_default_fixture(self):
         return func.current_timestamp()
@@ -1885,3 +2108,42 @@ class BatchRoundTripPostgresqlTest(BatchRoundTripTest):
         super(
             BatchRoundTripPostgresqlTest, self
         ).test_change_type_boolean_to_int()
+
+    def test_add_col_table_has_native_boolean(self):
+        self._native_boolean_fixture()
+
+        # to ensure test coverage on SQLAlchemy 1.4 and above,
+        # force the create_constraint flag to True even though it
+        # defaults to false in 1.4.  this test wants to ensure that the
+        # "should create" rule is consulted
+        def listen_for_reflect(inspector, table, column_info):
+            if isinstance(column_info["type"], Boolean):
+                column_info["type"].create_constraint = True
+
+        with self.op.batch_alter_table(
+            "has_native_bool",
+            recreate="always",
+            reflect_kwargs={
+                "listeners": [("column_reflect", listen_for_reflect)]
+            },
+        ) as batch_op:
+            batch_op.add_column(Column("data", Integer))
+
+        insp = inspect(config.db)
+
+        eq_(
+            [
+                c["type"]._type_affinity
+                for c in insp.get_columns("has_native_bool")
+                if c["name"] == "data"
+            ],
+            [Integer],
+        )
+        eq_(
+            [
+                c["type"]._type_affinity
+                for c in insp.get_columns("has_native_bool")
+                if c["name"] == "x"
+            ],
+            [Boolean],
+        )

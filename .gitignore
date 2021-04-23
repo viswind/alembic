@@ -15,3 +15,6 @@ coverage.xml
 /scratch_test_*
 /test_schema.db
 .idea/
+.vscode/
+.pytest_cache/
+/docs/build/_build/

@@ -6,7 +6,9 @@ import os
 import re
 
 from sqlalchemy import exc as sqla_exc
+from sqlalchemy import text
 
+from alembic import __version__
 from alembic import command
 from alembic import config
 from alembic import testing
@@ -15,6 +17,8 @@ from alembic.script import ScriptDirectory
 from alembic.testing import assert_raises
 from alembic.testing import assert_raises_message
 from alembic.testing import eq_
+from alembic.testing import is_false
+from alembic.testing import is_true
 from alembic.testing import mock
 from alembic.testing.env import _get_staging_directory
 from alembic.testing.env import _no_sql_testing_config
@@ -29,6 +33,8 @@ from alembic.testing.env import write_script
 from alembic.testing.fixtures import capture_context_buffer
 from alembic.testing.fixtures import capture_engine_context_buffer
 from alembic.testing.fixtures import TestBase
+from alembic.util import compat
+from alembic.util.sqla_compat import _connectable_has_table
 
 
 class _BufMixin(object):
@@ -197,6 +203,7 @@ finally:
 class CurrentTest(_BufMixin, TestBase):
     @classmethod
     def setup_class(cls):
+        cls.bind = _sqlite_file_db()
         cls.env = env = staging_env()
         cls.cfg = _sqlite_testing_config()
         cls.a1 = env.generate_revision("a1", "a1")
@@ -228,6 +235,12 @@ class CurrentTest(_BufMixin, TestBase):
 
         eq_(lines, set(revs))
 
+    def test_doesnt_create_alembic_version(self):
+        command.current(self.cfg)
+        engine = self.bind
+        with engine.connect() as conn:
+            is_false(_connectable_has_table(conn, "alembic_version", None))
+
     def test_no_current(self):
         command.stamp(self.cfg, ())
         with self._assert_lines([]):
@@ -238,6 +251,12 @@ class CurrentTest(_BufMixin, TestBase):
         command.stamp(self.cfg, self.a3.revision)
         with self._assert_lines(["a3"]):
             command.current(self.cfg)
+
+    def test_current_obfuscate_password(self):
+        eq_(
+            util.obfuscate_url_pw("postgresql://scott:tiger@localhost/test"),
+            "postgresql://scott:XXXXX@localhost/test",
+        )
 
     def test_two_heads(self):
         command.stamp(self.cfg, ())
@@ -371,11 +390,14 @@ finally:
         r2 = command.revision(self.cfg)
         db = _sqlite_file_db()
         command.upgrade(self.cfg, "head")
-        assert_raises(
-            sqla_exc.IntegrityError,
-            db.execute,
-            "insert into alembic_version values ('%s')" % r2.revision,
-        )
+        with db.connect() as conn:
+            assert_raises(
+                sqla_exc.IntegrityError,
+                conn.execute,
+                text(
+                    "insert into alembic_version values ('%s')" % r2.revision
+                ),
+            )
 
     def test_err_correctly_raised_on_dupe_rows_no_pk(self):
         self._env_fixture(version_table_pk=False)
@@ -383,7 +405,10 @@ finally:
         r2 = command.revision(self.cfg)
         db = _sqlite_file_db()
         command.upgrade(self.cfg, "head")
-        db.execute("insert into alembic_version values ('%s')" % r2.revision)
+        with db.begin() as conn:
+            conn.execute(
+                text("insert into alembic_version values ('%s')" % r2.revision)
+            )
         assert_raises_message(
             util.CommandError,
             "Online migration expected to match one row when "
@@ -662,9 +687,9 @@ class StampMultipleHeadsTest(TestBase, _StampTest):
         command.stamp(self.cfg, [self.a])
 
         eng = _sqlite_file_db()
-        with eng.connect() as conn:
+        with eng.begin() as conn:
             result = conn.execute(
-                "update alembic_version set version_num='fake'"
+                text("update alembic_version set version_num='fake'")
             )
             eq_(result.rowcount, 1)
 
@@ -843,31 +868,39 @@ down_revision = '%s'
 
     def test_stamp_creates_table(self):
         command.stamp(self.cfg, "head")
-        eq_(
-            self.bind.scalar("select version_num from alembic_version"), self.b
-        )
+        with self.bind.connect() as conn:
+            eq_(
+                conn.scalar(text("select version_num from alembic_version")),
+                self.b,
+            )
 
     def test_stamp_existing_upgrade(self):
         command.stamp(self.cfg, self.a)
         command.stamp(self.cfg, self.b)
-        eq_(
-            self.bind.scalar("select version_num from alembic_version"), self.b
-        )
+        with self.bind.connect() as conn:
+            eq_(
+                conn.scalar(text("select version_num from alembic_version")),
+                self.b,
+            )
 
     def test_stamp_existing_downgrade(self):
         command.stamp(self.cfg, self.b)
         command.stamp(self.cfg, self.a)
-        eq_(
-            self.bind.scalar("select version_num from alembic_version"), self.a
-        )
+        with self.bind.connect() as conn:
+            eq_(
+                conn.scalar(text("select version_num from alembic_version")),
+                self.a,
+            )
 
     def test_stamp_version_already_there(self):
         command.stamp(self.cfg, self.b)
         command.stamp(self.cfg, self.b)
 
-        eq_(
-            self.bind.scalar("select version_num from alembic_version"), self.b
-        )
+        with self.bind.connect() as conn:
+            eq_(
+                conn.scalar(text("select version_num from alembic_version")),
+                self.b,
+            )
 
 
 class EditTest(TestBase):
@@ -887,7 +920,7 @@ class EditTest(TestBase):
     def test_edit_head(self):
         expected_call_arg = os.path.normpath(
             "%s/scripts/versions/%s_revision_c.py"
-            % (EditTest.cfg.config_args["here"], EditTest.c,)
+            % (EditTest.cfg.config_args["here"], EditTest.c)
         )
 
         with mock.patch("alembic.util.edit") as edit:
@@ -897,7 +930,7 @@ class EditTest(TestBase):
     def test_edit_b(self):
         expected_call_arg = os.path.normpath(
             "%s/scripts/versions/%s_revision_b.py"
-            % (EditTest.cfg.config_args["here"], EditTest.b,)
+            % (EditTest.cfg.config_args["here"], EditTest.b)
         )
 
         with mock.patch("alembic.util.edit") as edit:
@@ -936,7 +969,7 @@ class EditTest(TestBase):
     def test_edit_current(self):
         expected_call_arg = os.path.normpath(
             "%s/scripts/versions/%s_revision_b.py"
-            % (EditTest.cfg.config_args["here"], EditTest.b,)
+            % (EditTest.cfg.config_args["here"], EditTest.b)
         )
 
         command.stamp(self.cfg, self.b)
@@ -1150,3 +1183,17 @@ class CommandLineTest(TestBase):
                     mock.call().close(),
                 ],
             )
+
+    def test_version_text(self):
+        buf = compat.StringIO()
+        to_mock = "sys.stdout" if util.compat.py3k else "sys.stderr"
+
+        with mock.patch(to_mock, buf):
+            try:
+                config.CommandLine(prog="test_prog").main(argv=["--version"])
+                assert False
+            except SystemExit:
+                pass
+
+        is_true("test_prog" in str(buf.getvalue()))
+        is_true(__version__ in str(buf.getvalue()))

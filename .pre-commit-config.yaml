@@ -1,19 +1,18 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
 repos:
--   repo: https://github.com/python/black/
-    rev: 19.3b0
+-   repo: https://github.com/python/black
+    rev: 20.8b1
     hooks:
     -   id: black
-        args: [-l 79]
 
--   repo: https://github.com/sqlalchemyorg/zimports/
-    rev: master
+-   repo: https://github.com/sqlalchemyorg/zimports
+    rev: 0.2.2
     hooks:
     -   id: zimports
 
 -   repo: https://github.com/pycqa/flake8
-    rev: master
+    rev: 3.8.4
     hooks:
     -   id: flake8
         additional_dependencies:

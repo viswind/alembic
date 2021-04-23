@@ -7,6 +7,7 @@ from sqlalchemy import event
 from sqlalchemy import exc
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
+from sqlalchemy import MetaData
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy.sql import column
@@ -18,6 +19,7 @@ from alembic import op
 from alembic.operations import ops
 from alembic.operations import schemaobj
 from alembic.testing import assert_raises_message
+from alembic.testing import combinations
 from alembic.testing import config
 from alembic.testing import eq_
 from alembic.testing import is_
@@ -111,6 +113,14 @@ class OpTest(TestBase):
         op.add_column("t1", Column("c1", Integer, nullable=False))
         context.assert_("ALTER TABLE t1 ADD COLUMN c1 INTEGER NOT NULL")
 
+    def test_add_column_already_attached(self):
+        context = op_fixture()
+        c1 = Column("c1", Integer, nullable=False)
+        Table("t", MetaData(), c1)
+
+        op.add_column("t1", c1)
+        context.assert_("ALTER TABLE t1 ADD COLUMN c1 INTEGER NOT NULL")
+
     def test_add_column_w_check(self):
         context = op_fixture()
         op.add_column(
@@ -181,7 +191,9 @@ class OpTest(TestBase):
     def test_add_column_schema_type(self):
         """Test that a schema type generates its constraints...."""
         context = op_fixture()
-        op.add_column("t1", Column("c1", Boolean, nullable=False))
+        op.add_column(
+            "t1", Column("c1", Boolean(create_constraint=True), nullable=False)
+        )
         context.assert_(
             "ALTER TABLE t1 ADD COLUMN c1 BOOLEAN NOT NULL",
             "ALTER TABLE t1 ADD CHECK (c1 IN (0, 1))",
@@ -191,7 +203,9 @@ class OpTest(TestBase):
         """Test that a schema type generates its constraints...."""
         context = op_fixture()
         op.add_column(
-            "t1", Column("c1", Boolean, nullable=False), schema="foo"
+            "t1",
+            Column("c1", Boolean(create_constraint=True), nullable=False),
+            schema="foo",
         )
         context.assert_(
             "ALTER TABLE foo.t1 ADD COLUMN c1 BOOLEAN NOT NULL",
@@ -202,7 +216,9 @@ class OpTest(TestBase):
         """Test that a schema type doesn't generate a
         constraint based on check rule."""
         context = op_fixture("postgresql")
-        op.add_column("t1", Column("c1", Boolean, nullable=False))
+        op.add_column(
+            "t1", Column("c1", Boolean(create_constraint=True), nullable=False)
+        )
         context.assert_("ALTER TABLE t1 ADD COLUMN c1 BOOLEAN NOT NULL")
 
     def test_add_column_fk_self_referential(self):
@@ -359,8 +375,16 @@ class OpTest(TestBase):
         op.alter_column("t", "c", server_default=None, schema="foo")
         context.assert_("ALTER TABLE foo.t ALTER COLUMN c DROP DEFAULT")
 
+    @combinations(
+        (lambda: sqla_compat.Computed("foo * 5"), lambda: None),
+        (lambda: None, lambda: sqla_compat.Computed("foo * 5")),
+        (
+            lambda: sqla_compat.Computed("foo * 42"),
+            lambda: sqla_compat.Computed("foo * 5"),
+        ),
+    )
     @config.requirements.computed_columns_api
-    def test_alter_column_computed_add_not_supported(self):
+    def test_alter_column_computed_not_supported(self, sd, esd):
         op_fixture()
         assert_raises_message(
             exc.CompileError,
@@ -370,27 +394,36 @@ class OpTest(TestBase):
             op.alter_column,
             "t1",
             "c1",
-            server_default=sqla_compat.Computed("foo * 5"),
+            server_default=sd(),
+            existing_server_default=esd(),
         )
 
-    @config.requirements.computed_columns_api
-    def test_alter_column_computed_remove_not_supported(self):
+    @combinations(
+        (lambda: sqla_compat.Identity(), lambda: None),
+        (lambda: None, lambda: sqla_compat.Identity()),
+        (
+            lambda: sqla_compat.Identity(),
+            lambda: sqla_compat.Identity(),
+        ),
+    )
+    @config.requirements.identity_columns_api
+    def test_alter_column_identity_not_supported(self, sd, esd):
         op_fixture()
         assert_raises_message(
             exc.CompileError,
-            'Adding or removing a "computed" construct, e.g. '
-            "GENERATED ALWAYS AS, to or from an existing column is not "
-            "supported.",
+            'Adding, removing or modifying an "identity" construct, '
+            "e.g. GENERATED AS IDENTITY, to or from an existing "
+            "column is not supported in this dialect.",
             op.alter_column,
             "t1",
             "c1",
-            server_default=None,
-            existing_server_default=sqla_compat.Computed("foo * 5"),
+            server_default=sd(),
+            existing_server_default=esd(),
         )
 
     def test_alter_column_schema_type_unnamed(self):
         context = op_fixture("mssql", native_boolean=False)
-        op.alter_column("t", "c", type_=Boolean())
+        op.alter_column("t", "c", type_=Boolean(create_constraint=True))
         context.assert_(
             "ALTER TABLE t ALTER COLUMN c BIT",
             "ALTER TABLE t ADD CHECK (c IN (0, 1))",
@@ -398,7 +431,9 @@ class OpTest(TestBase):
 
     def test_alter_column_schema_schema_type_unnamed(self):
         context = op_fixture("mssql", native_boolean=False)
-        op.alter_column("t", "c", type_=Boolean(), schema="foo")
+        op.alter_column(
+            "t", "c", type_=Boolean(create_constraint=True), schema="foo"
+        )
         context.assert_(
             "ALTER TABLE foo.t ALTER COLUMN c BIT",
             "ALTER TABLE foo.t ADD CHECK (c IN (0, 1))",
@@ -406,7 +441,9 @@ class OpTest(TestBase):
 
     def test_alter_column_schema_type_named(self):
         context = op_fixture("mssql", native_boolean=False)
-        op.alter_column("t", "c", type_=Boolean(name="xyz"))
+        op.alter_column(
+            "t", "c", type_=Boolean(name="xyz", create_constraint=True)
+        )
         context.assert_(
             "ALTER TABLE t ALTER COLUMN c BIT",
             "ALTER TABLE t ADD CONSTRAINT xyz CHECK (c IN (0, 1))",
@@ -414,16 +451,49 @@ class OpTest(TestBase):
 
     def test_alter_column_schema_schema_type_named(self):
         context = op_fixture("mssql", native_boolean=False)
-        op.alter_column("t", "c", type_=Boolean(name="xyz"), schema="foo")
+        op.alter_column(
+            "t",
+            "c",
+            type_=Boolean(name="xyz", create_constraint=True),
+            schema="foo",
+        )
         context.assert_(
             "ALTER TABLE foo.t ALTER COLUMN c BIT",
             "ALTER TABLE foo.t ADD CONSTRAINT xyz CHECK (c IN (0, 1))",
         )
 
+    @combinations((True,), (False,), argnames="pass_existing_type")
+    @combinations((True,), (False,), argnames="change_nullability")
+    def test_generic_alter_column_type_and_nullability(
+        self, pass_existing_type, change_nullability
+    ):
+        # this test is also on the mssql dialect in test_mssql
+        context = op_fixture()
+
+        args = dict(type_=Integer)
+        if pass_existing_type:
+            args["existing_type"] = String(15)
+
+        if change_nullability:
+            args["nullable"] = False
+
+        op.alter_column("t", "c", **args)
+
+        if change_nullability:
+            context.assert_(
+                "ALTER TABLE t ALTER COLUMN c SET NOT NULL",
+                "ALTER TABLE t ALTER COLUMN c TYPE INTEGER",
+            )
+        else:
+            context.assert_("ALTER TABLE t ALTER COLUMN c TYPE INTEGER")
+
     def test_alter_column_schema_type_existing_type(self):
         context = op_fixture("mssql", native_boolean=False)
         op.alter_column(
-            "t", "c", type_=String(10), existing_type=Boolean(name="xyz")
+            "t",
+            "c",
+            type_=String(10),
+            existing_type=Boolean(name="xyz", create_constraint=True),
         )
         context.assert_(
             "ALTER TABLE t DROP CONSTRAINT xyz",
@@ -436,7 +506,7 @@ class OpTest(TestBase):
             "t",
             "c",
             type_=String(10),
-            existing_type=Boolean(name="xyz"),
+            existing_type=Boolean(name="xyz", create_constraint=True),
             schema="foo",
         )
         context.assert_(
@@ -679,62 +749,6 @@ class OpTest(TestBase):
             "ALTER TABLE t1 ADD CONSTRAINT uk_test UNIQUE (foo, bar)"
         )
 
-    def test_add_foreign_key_legacy_kwarg(self):
-        context = op_fixture()
-
-        op.create_foreign_key(
-            name="some_fk",
-            source="some_table",
-            referent="referred_table",
-            local_cols=["a", "b"],
-            remote_cols=["c", "d"],
-            ondelete="CASCADE",
-        )
-        context.assert_(
-            "ALTER TABLE some_table ADD CONSTRAINT some_fk "
-            "FOREIGN KEY(a, b) REFERENCES referred_table (c, d) "
-            "ON DELETE CASCADE"
-        )
-
-    def test_add_unique_constraint_legacy_kwarg(self):
-        context = op_fixture()
-        op.create_unique_constraint(
-            name="uk_test", source="t1", local_cols=["foo", "bar"]
-        )
-        context.assert_(
-            "ALTER TABLE t1 ADD CONSTRAINT uk_test UNIQUE (foo, bar)"
-        )
-
-    def test_drop_constraint_legacy_kwarg(self):
-        context = op_fixture()
-        op.drop_constraint(
-            name="pk_name", table_name="sometable", type_="primary"
-        )
-        context.assert_("ALTER TABLE sometable DROP CONSTRAINT pk_name")
-
-    def test_create_pk_legacy_kwarg(self):
-        context = op_fixture()
-        op.create_primary_key(
-            name=None,
-            table_name="sometable",
-            cols=["router_id", "l3_agent_id"],
-        )
-        context.assert_(
-            "ALTER TABLE sometable ADD PRIMARY KEY (router_id, l3_agent_id)"
-        )
-
-    def test_legacy_kwarg_catches_arg_missing(self):
-        op_fixture()
-
-        assert_raises_message(
-            TypeError,
-            "missing required positional argument: columns",
-            op.create_primary_key,
-            name=None,
-            table_name="sometable",
-            wrong_cols=["router_id", "l3_agent_id"],
-        )
-
     def test_add_unique_constraint_schema(self):
         context = op_fixture()
         op.create_unique_constraint(
@@ -917,16 +931,8 @@ class OpTest(TestBase):
 
     def test_naming_changes(self):
         context = op_fixture()
-        op.alter_column("t", "c", name="x")
-        context.assert_("ALTER TABLE t RENAME c TO x")
-
-        context = op_fixture()
         op.alter_column("t", "c", new_column_name="x")
         context.assert_("ALTER TABLE t RENAME c TO x")
-
-        context = op_fixture("mysql")
-        op.drop_constraint("f1", "t1", type="foreignkey")
-        context.assert_("ALTER TABLE t1 DROP FOREIGN KEY f1")
 
         context = op_fixture("mysql")
         op.drop_constraint("f1", "t1", type_="foreignkey")
@@ -934,7 +940,7 @@ class OpTest(TestBase):
 
     def test_naming_changes_drop_idx(self):
         context = op_fixture("mssql")
-        op.drop_index("ik_test", tablename="t1")
+        op.drop_index("ik_test", table_name="t1")
         context.assert_("DROP INDEX ik_test ON t1")
 
     @config.requirements.comments

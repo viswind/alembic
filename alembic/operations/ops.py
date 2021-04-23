@@ -14,8 +14,6 @@ class MigrateOperation(object):
 
     This system is part of the operation extensibility API.
 
-    .. versionadded:: 0.8.0
-
     .. seealso::
 
         :ref:`operation_objects`
@@ -108,6 +106,7 @@ class DropConstraintOp(MigrateOperation):
             "primary_key_constraint": "primary",
             "check_constraint": "check",
             "column_check_constraint": "check",
+            "table_or_column_check_constraint": "check",
         }
 
         constraint_table = sqla_compat._table_for_constraint(constraint)
@@ -129,7 +128,6 @@ class DropConstraintOp(MigrateOperation):
             )
 
     @classmethod
-    @util._with_legacy_names([("type", "type_"), ("name", "constraint_name")])
     def drop_constraint(
         cls, operations, constraint_name, table_name, type_=None, schema=None
     ):
@@ -143,14 +141,6 @@ class DropConstraintOp(MigrateOperation):
          quoting of the schema outside of the default behavior, use
          the SQLAlchemy construct
          :class:`~sqlalchemy.sql.elements.quoted_name`.
-
-         .. versionadded:: 0.7.0 'schema' can now accept a
-            :class:`~sqlalchemy.sql.elements.quoted_name` construct.
-
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> constraint_name
 
         """
 
@@ -168,11 +158,6 @@ class DropConstraintOp(MigrateOperation):
         .. seealso::
 
             :meth:`.Operations.drop_constraint`
-
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> constraint_name
 
         """
         op = cls(
@@ -235,9 +220,6 @@ class CreatePrimaryKeyOp(AddConstraintOp):
         )
 
     @classmethod
-    @util._with_legacy_names(
-        [("name", "constraint_name"), ("cols", "columns")]
-    )
     def create_primary_key(
         cls, operations, constraint_name, table_name, columns, schema=None
     ):
@@ -275,15 +257,6 @@ class CreatePrimaryKeyOp(AddConstraintOp):
          quoting of the schema outside of the default behavior, use
          the SQLAlchemy construct
          :class:`~sqlalchemy.sql.elements.quoted_name`.
-
-         .. versionadded:: 0.7.0 'schema' can now accept a
-            :class:`~sqlalchemy.sql.elements.quoted_name` construct.
-
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> constraint_name
-           * cols -> columns
 
         """
         op = cls(constraint_name, table_name, columns, schema)
@@ -370,13 +343,6 @@ class CreateUniqueConstraintOp(AddConstraintOp):
         )
 
     @classmethod
-    @util._with_legacy_names(
-        [
-            ("name", "constraint_name"),
-            ("source", "table_name"),
-            ("local_cols", "columns"),
-        ]
-    )
     def create_unique_constraint(
         cls,
         operations,
@@ -422,23 +388,12 @@ class CreateUniqueConstraintOp(AddConstraintOp):
          the SQLAlchemy construct
          :class:`~sqlalchemy.sql.elements.quoted_name`.
 
-         .. versionadded:: 0.7.0 'schema' can now accept a
-            :class:`~sqlalchemy.sql.elements.quoted_name` construct.
-
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> constraint_name
-           * source -> table_name
-           * local_cols -> columns
-
         """
 
         op = cls(constraint_name, table_name, columns, schema=schema, **kw)
         return operations.invoke(op)
 
     @classmethod
-    @util._with_legacy_names([("name", "constraint_name")])
     def batch_create_unique_constraint(
         cls, operations, constraint_name, columns, **kw
     ):
@@ -451,11 +406,6 @@ class CreateUniqueConstraintOp(AddConstraintOp):
         .. seealso::
 
             :meth:`.Operations.create_unique_constraint`
-
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> constraint_name
 
         """
         kw["schema"] = operations.impl.schema
@@ -548,13 +498,6 @@ class CreateForeignKeyOp(AddConstraintOp):
         )
 
     @classmethod
-    @util._with_legacy_names(
-        [
-            ("name", "constraint_name"),
-            ("source", "source_table"),
-            ("referent", "referent_table"),
-        ]
-    )
     def create_foreign_key(
         cls,
         operations,
@@ -615,13 +558,6 @@ class CreateForeignKeyOp(AddConstraintOp):
         :param source_schema: Optional schema name of the source table.
         :param referent_schema: Optional schema name of the destination table.
 
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> constraint_name
-           * source -> source_table
-           * referent -> referent_table
-
         """
 
         op = cls(
@@ -642,9 +578,6 @@ class CreateForeignKeyOp(AddConstraintOp):
         return operations.invoke(op)
 
     @classmethod
-    @util._with_legacy_names(
-        [("name", "constraint_name"), ("referent", "referent_table")]
-    )
     def batch_create_foreign_key(
         cls,
         operations,
@@ -677,12 +610,6 @@ class CreateForeignKeyOp(AddConstraintOp):
 
             :meth:`.Operations.create_foreign_key`
 
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> constraint_name
-           * referent -> referent_table
-
         """
         op = cls(
             constraint_name,
@@ -707,6 +634,7 @@ class CreateForeignKeyOp(AddConstraintOp):
     "create_check_constraint", "batch_create_check_constraint"
 )
 @AddConstraintOp.register_add_constraint("check_constraint")
+@AddConstraintOp.register_add_constraint("table_or_column_check_constraint")
 @AddConstraintOp.register_add_constraint("column_check_constraint")
 class CreateCheckConstraintOp(AddConstraintOp):
     """Represent a create check constraint operation."""
@@ -754,9 +682,6 @@ class CreateCheckConstraintOp(AddConstraintOp):
         )
 
     @classmethod
-    @util._with_legacy_names(
-        [("name", "constraint_name"), ("source", "table_name")]
-    )
     def create_check_constraint(
         cls,
         operations,
@@ -805,21 +730,11 @@ class CreateCheckConstraintOp(AddConstraintOp):
          the SQLAlchemy construct
          :class:`~sqlalchemy.sql.elements.quoted_name`.
 
-         .. versionadded:: 0.7.0 'schema' can now accept a
-            :class:`~sqlalchemy.sql.elements.quoted_name` construct.
-
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> constraint_name
-           * source -> table_name
-
         """
         op = cls(constraint_name, table_name, condition, schema=schema, **kw)
         return operations.invoke(op)
 
     @classmethod
-    @util._with_legacy_names([("name", "constraint_name")])
     def batch_create_check_constraint(
         cls, operations, constraint_name, condition, **kw
     ):
@@ -832,11 +747,6 @@ class CreateCheckConstraintOp(AddConstraintOp):
         .. seealso::
 
             :meth:`.Operations.create_check_constraint`
-
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> constraint_name
 
         """
         op = cls(
@@ -904,7 +814,6 @@ class CreateIndexOp(MigrateOperation):
         )
 
     @classmethod
-    @util._with_legacy_names([("name", "index_name")])
     def create_index(
         cls,
         operations,
@@ -930,12 +839,6 @@ class CreateIndexOp(MigrateOperation):
             from sqlalchemy import text
             op.create_index('ik_test', 't1', [text('lower(foo)')])
 
-        .. versionadded:: 0.6.7 support for making use of the
-           :func:`~sqlalchemy.sql.expression.text` construct in
-           conjunction with
-           :meth:`.Operations.create_index` in
-           order to produce functional expressions within CREATE INDEX.
-
         :param index_name: name of the index.
         :param table_name: name of the owning table.
         :param columns: a list consisting of string column names and/or
@@ -944,10 +847,6 @@ class CreateIndexOp(MigrateOperation):
          quoting of the schema outside of the default behavior, use
          the SQLAlchemy construct
          :class:`~sqlalchemy.sql.elements.quoted_name`.
-
-         .. versionadded:: 0.7.0 'schema' can now accept a
-            :class:`~sqlalchemy.sql.elements.quoted_name` construct.
-
         :param unique: If True, create a unique index.
 
         :param quote:
@@ -964,11 +863,6 @@ class CreateIndexOp(MigrateOperation):
             ``<dialectname>_<argname>``.
             See the documentation regarding an individual dialect at
             :ref:`dialect_toplevel` for detail on documented arguments.
-
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> index_name
 
         """
         op = cls(
@@ -1048,9 +942,6 @@ class DropIndexOp(MigrateOperation):
         )
 
     @classmethod
-    @util._with_legacy_names(
-        [("name", "index_name"), ("tablename", "table_name")]
-    )
     def drop_index(
         cls, operations, index_name, table_name=None, schema=None, **kw
     ):
@@ -1068,30 +959,17 @@ class DropIndexOp(MigrateOperation):
          quoting of the schema outside of the default behavior, use
          the SQLAlchemy construct
          :class:`~sqlalchemy.sql.elements.quoted_name`.
-
-         .. versionadded:: 0.7.0 'schema' can now accept a
-            :class:`~sqlalchemy.sql.elements.quoted_name` construct.
-
         :param \**kw: Additional keyword arguments not mentioned above are
             dialect specific, and passed in the form
             ``<dialectname>_<argname>``.
             See the documentation regarding an individual dialect at
             :ref:`dialect_toplevel` for detail on documented arguments.
 
-            .. versionadded:: 0.9.5 Support for dialect-specific keyword
-               arguments for DROP INDEX
-
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> index_name
-
         """
         op = cls(index_name, table_name=table_name, schema=schema, **kw)
         return operations.invoke(op)
 
     @classmethod
-    @util._with_legacy_names([("name", "index_name")])
     def batch_drop_index(cls, operations, index_name, **kw):
         """Issue a "drop index" instruction using the
         current batch migration context.
@@ -1099,11 +977,6 @@ class DropIndexOp(MigrateOperation):
         .. seealso::
 
             :meth:`.Operations.drop_index`
-
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> index_name
 
         """
 
@@ -1155,7 +1028,6 @@ class CreateTableOp(MigrateOperation):
         )
 
     @classmethod
-    @util._with_legacy_names([("name", "table_name")])
     def create_table(cls, operations, table_name, *columns, **kw):
         r"""Issue a "create table" instruction using the current migration
         context.
@@ -1216,8 +1088,6 @@ class CreateTableOp(MigrateOperation):
                 ]
             )
 
-        .. versionadded:: 0.7.0
-
         :param table_name: Name of the table
         :param \*columns: collection of :class:`~sqlalchemy.schema.Column`
          objects within
@@ -1228,22 +1098,11 @@ class CreateTableOp(MigrateOperation):
          quoting of the schema outside of the default behavior, use
          the SQLAlchemy construct
          :class:`~sqlalchemy.sql.elements.quoted_name`.
-
-         .. versionadded:: 0.7.0 'schema' can now accept a
-            :class:`~sqlalchemy.sql.elements.quoted_name` construct.
         :param \**kw: Other keyword arguments are passed to the underlying
          :class:`sqlalchemy.schema.Table` object created for the command.
 
         :return: the :class:`~sqlalchemy.schema.Table` object corresponding
          to the parameters given.
-
-         .. versionadded:: 0.7.0 - the :class:`~sqlalchemy.schema.Table`
-            object is returned.
-
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> table_name
 
         """
         op = cls(table_name, columns, **kw)
@@ -1285,7 +1144,6 @@ class DropTableOp(MigrateOperation):
         )
 
     @classmethod
-    @util._with_legacy_names([("name", "table_name")])
     def drop_table(cls, operations, table_name, schema=None, **kw):
         r"""Issue a "drop table" instruction using the current
         migration context.
@@ -1300,17 +1158,8 @@ class DropTableOp(MigrateOperation):
          quoting of the schema outside of the default behavior, use
          the SQLAlchemy construct
          :class:`~sqlalchemy.sql.elements.quoted_name`.
-
-         .. versionadded:: 0.7.0 'schema' can now accept a
-            :class:`~sqlalchemy.sql.elements.quoted_name` construct.
-
         :param \**kw: Other keyword arguments are passed to the underlying
          :class:`sqlalchemy.schema.Table` object created for the command.
-
-        .. versionchanged:: 0.8.0 The following positional argument names
-           have been changed:
-
-           * name -> table_name
 
         """
         op = cls(table_name, schema=schema, table_kw=kw)
@@ -1346,9 +1195,6 @@ class RenameTableOp(AlterTableOp):
          the SQLAlchemy construct
          :class:`~sqlalchemy.sql.elements.quoted_name`.
 
-         .. versionadded:: 0.7.0 'schema' can now accept a
-            :class:`~sqlalchemy.sql.elements.quoted_name` construct.
-
         """
         op = cls(old_table_name, new_table_name, schema=schema)
         return operations.invoke(op)
@@ -1356,8 +1202,7 @@ class RenameTableOp(AlterTableOp):
 
 @Operations.register_operation("create_table_comment")
 class CreateTableCommentOp(AlterTableOp):
-    """Represent a COMMENT ON `table` operation.
-    """
+    """Represent a COMMENT ON `table` operation."""
 
     def __init__(
         self, table_name, comment, schema=None, existing_comment=None
@@ -1405,8 +1250,7 @@ class CreateTableCommentOp(AlterTableOp):
         return operations.invoke(op)
 
     def reverse(self):
-        """Reverses the COMMENT ON operation against a table.
-        """
+        """Reverses the COMMENT ON operation against a table."""
         if self.existing_comment is None:
             return DropTableCommentOp(
                 self.table_name,
@@ -1434,8 +1278,7 @@ class CreateTableCommentOp(AlterTableOp):
 
 @Operations.register_operation("drop_table_comment")
 class DropTableCommentOp(AlterTableOp):
-    """Represent an operation to remove the comment from a table.
-    """
+    """Represent an operation to remove the comment from a table."""
 
     def __init__(self, table_name, schema=None, existing_comment=None):
         self.table_name = table_name
@@ -1467,8 +1310,7 @@ class DropTableCommentOp(AlterTableOp):
         return operations.invoke(op)
 
     def reverse(self):
-        """Reverses the COMMENT ON operation against a table.
-        """
+        """Reverses the COMMENT ON operation against a table."""
         return CreateTableCommentOp(
             self.table_name, self.existing_comment, schema=self.schema
         )
@@ -1645,7 +1487,6 @@ class AlterColumnOp(AlterTableOp):
         )
 
     @classmethod
-    @util._with_legacy_names([("name", "new_column_name")])
     def alter_column(
         cls,
         operations,
@@ -1744,17 +1585,11 @@ class AlterColumnOp(AlterTableOp):
          quoting of the schema outside of the default behavior, use
          the SQLAlchemy construct
          :class:`~sqlalchemy.sql.elements.quoted_name`.
-
-         .. versionadded:: 0.7.0 'schema' can now accept a
-            :class:`~sqlalchemy.sql.elements.quoted_name` construct.
-
         :param postgresql_using: String argument which will indicate a
          SQL expression to render within the Postgresql-specific USING clause
          within ALTER COLUMN.    This string is taken directly as raw SQL which
          must explicitly include any necessary quoting or escaping of tokens
          within the expression.
-
-         .. versionadded:: 0.8.8
 
         """
 
@@ -1917,10 +1752,6 @@ class AddColumnOp(AlterTableOp):
          the SQLAlchemy construct
          :class:`~sqlalchemy.sql.elements.quoted_name`.
 
-         .. versionadded:: 0.7.0 'schema' can now accept a
-            :class:`~sqlalchemy.sql.elements.quoted_name` construct.
-
-
         """
 
         op = cls(table_name, column, schema=schema)
@@ -2013,10 +1844,6 @@ class DropColumnOp(AlterTableOp):
          quoting of the schema outside of the default behavior, use
          the SQLAlchemy construct
          :class:`~sqlalchemy.sql.elements.quoted_name`.
-
-         .. versionadded:: 0.7.0 'schema' can now accept a
-            :class:`~sqlalchemy.sql.elements.quoted_name` construct.
-
         :param mssql_drop_check: Optional boolean.  When ``True``, on
          Microsoft SQL Server only, first
          drop the CHECK constraint on the column using a
@@ -2038,8 +1865,6 @@ class DropColumnOp(AlterTableOp):
          then exec's a separate DROP CONSTRAINT for that default.  Only
          works if the column has exactly one FK constraint which refers to
          it, at the moment.
-
-         .. versionadded:: 0.6.2
 
         """
 
@@ -2136,12 +1961,6 @@ class BulkInsertOp(MigrateOperation):
         still be rendered, rather than attempting to pass the values
         as bound parameters.
 
-        .. versionadded:: 0.6.4 :meth:`.Operations.inline_literal` can now
-           be used with :meth:`.Operations.bulk_insert`, and the
-           :paramref:`~.Operations.bulk_insert.multiinsert` flag has
-           been added to assist in this usage when running in "online"
-           mode.
-
         :param table: a table object which represents the target of the INSERT.
 
         :param rows: a list of dictionaries indicating rows.
@@ -2155,9 +1974,7 @@ class BulkInsertOp(MigrateOperation):
            in those cases where non-literal values are present in the
            parameter sets.
 
-           .. versionadded:: 0.6.4
-
-          """
+        """
 
         op = cls(table, rows, multiinsert=multiinsert)
         operations.invoke(op)
@@ -2358,11 +2175,6 @@ class MigrationScript(MigrateOperation):
     and ``.downgrade_ops_list`` list-based attributes.  These latter
     attributes are always available at the very least as single-element lists.
 
-    .. versionchanged:: 0.8.1 the ``.upgrade_ops`` and ``.downgrade_ops``
-       attributes should be accessed via the ``.upgrade_ops_list``
-       and ``.downgrade_ops_list`` attributes if multiple autogenerate
-       passes proceed on the same :class:`.MigrationScript` object.
-
     .. seealso::
 
         :ref:`customizing_revision`
@@ -2451,8 +2263,6 @@ class MigrationScript(MigrateOperation):
         attribute when dealing with a revision operation that does
         multiple autogenerate passes.
 
-        .. versionadded:: 0.8.1
-
         """
         return self._upgrade_ops
 
@@ -2463,8 +2273,6 @@ class MigrationScript(MigrateOperation):
         This is used in place of the :attr:`.MigrationScript.downgrade_ops`
         attribute when dealing with a revision operation that does
         multiple autogenerate passes.
-
-        .. versionadded:: 0.8.1
 
         """
         return self._downgrade_ops

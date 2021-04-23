@@ -1,5 +1,8 @@
 import re
 
+from sqlalchemy import cast
+from sqlalchemy import JSON
+
 from .impl import DefaultImpl
 from .. import util
 
@@ -50,7 +53,6 @@ class SQLiteImpl(DefaultImpl):
                 "No support for ALTER of constraints in SQLite dialect"
                 "Please refer to the batch mode feature which allows for "
                 "SQLite migrations using a copy-and-move strategy."
-
             )
 
     def compare_server_default(
@@ -117,6 +119,15 @@ class SQLiteImpl(DefaultImpl):
         ):
             str_expr = "(%s)" % (str_expr,)
         return str_expr
+
+    def cast_for_batch_migrate(self, existing, existing_transfer, new_type):
+        if (
+            existing.type._type_affinity is not new_type._type_affinity
+            and not isinstance(new_type, JSON)
+        ):
+            existing_transfer["expr"] = cast(
+                existing_transfer["expr"], new_type
+            )
 
 
 # @compiles(AddColumn, 'sqlite')

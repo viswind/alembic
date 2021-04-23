@@ -7,6 +7,7 @@ from sqlalchemy import MetaData
 from sqlalchemy import String
 from sqlalchemy import Table
 
+from alembic.testing import combinations
 from alembic.testing import config
 from alembic.testing import eq_
 from alembic.testing import mock
@@ -217,6 +218,71 @@ class AutogenerateForeignKeysTest(AutogenFixtureTest, TestBase):
 
         eq_(diffs, [])
 
+    def test_casing_convention_changed_so_put_drops_first(self):
+        m1 = MetaData()
+        m2 = MetaData()
+
+        Table(
+            "some_table",
+            m1,
+            Column("test", String(10), primary_key=True),
+            mysql_engine="InnoDB",
+        )
+
+        Table(
+            "user",
+            m1,
+            Column("id", Integer, primary_key=True),
+            Column("name", String(50), nullable=False),
+            Column("a1", String(10), server_default="x"),
+            Column("test2", String(10)),
+            ForeignKeyConstraint(["test2"], ["some_table.test"], name="MyFK"),
+            mysql_engine="InnoDB",
+        )
+
+        Table(
+            "some_table",
+            m2,
+            Column("test", String(10), primary_key=True),
+            mysql_engine="InnoDB",
+        )
+
+        # foreign key autogen currently does not take "name" into account,
+        # so change the def just for the purposes of testing the
+        # add/drop order for now.
+        Table(
+            "user",
+            m2,
+            Column("id", Integer, primary_key=True),
+            Column("name", String(50), nullable=False),
+            Column("a1", String(10), server_default="x"),
+            Column("test2", String(10)),
+            ForeignKeyConstraint(["a1"], ["some_table.test"], name="myfk"),
+            mysql_engine="InnoDB",
+        )
+
+        diffs = self._fixture(m1, m2)
+
+        self._assert_fk_diff(
+            diffs[0],
+            "remove_fk",
+            "user",
+            ["test2"],
+            "some_table",
+            ["test"],
+            name="MyFK" if config.requirements.fk_names.enabled else None,
+        )
+
+        self._assert_fk_diff(
+            diffs[1],
+            "add_fk",
+            "user",
+            ["a1"],
+            "some_table",
+            ["test"],
+            name="myfk",
+        )
+
     def test_add_composite_fk_with_name(self):
         m1 = MetaData()
         m2 = MetaData()
@@ -265,7 +331,6 @@ class AutogenerateForeignKeysTest(AutogenFixtureTest, TestBase):
         )
 
         diffs = self._fixture(m1, m2)
-
         self._assert_fk_diff(
             diffs[0],
             "add_fk",
@@ -445,8 +510,9 @@ class IncludeHooksTest(AutogenFixtureTest, TestBase):
     __backend__ = True
     __requires__ = ("fk_names",)
 
+    @combinations(("object",), ("name",))
     @config.requirements.no_name_normalize
-    def test_remove_connection_fk(self):
+    def test_remove_connection_fk(self, hook_type):
         m1 = MetaData()
         m2 = MetaData()
 
@@ -484,15 +550,37 @@ class IncludeHooksTest(AutogenFixtureTest, TestBase):
             mysql_engine="InnoDB",
         )
 
-        def include_object(object_, name, type_, reflected, compare_to):
-            return not (
-                isinstance(object_, ForeignKeyConstraint)
-                and type_ == "foreign_key_constraint"
-                and reflected
-                and name == "fk1"
-            )
+        if hook_type == "object":
 
-        diffs = self._fixture(m1, m2, object_filters=include_object)
+            def include_object(object_, name, type_, reflected, compare_to):
+                return not (
+                    isinstance(object_, ForeignKeyConstraint)
+                    and type_ == "foreign_key_constraint"
+                    and reflected
+                    and name == "fk1"
+                )
+
+            diffs = self._fixture(m1, m2, object_filters=include_object)
+        elif hook_type == "name":
+
+            def include_name(name, type_, parent_names):
+                if name == "fk1":
+                    if type_ == "index":  # MariaDB thing
+                        return True
+                    eq_(type_, "foreign_key_constraint")
+                    eq_(
+                        parent_names,
+                        {
+                            "schema_name": None,
+                            "table_name": "t",
+                            "schema_qualified_table_name": "t",
+                        },
+                    )
+                    return False
+                else:
+                    return True
+
+            diffs = self._fixture(m1, m2, name_filters=include_name)
 
         self._assert_fk_diff(
             diffs[0],
@@ -558,8 +646,9 @@ class IncludeHooksTest(AutogenFixtureTest, TestBase):
         )
         eq_(len(diffs), 1)
 
+    @combinations(("object",), ("name",))
     @config.requirements.no_name_normalize
-    def test_change_fk(self):
+    def test_change_fk(self, hook_type):
         m1 = MetaData()
         m2 = MetaData()
 
@@ -623,33 +712,61 @@ class IncludeHooksTest(AutogenFixtureTest, TestBase):
             )
         )
 
-        def include_object(object_, name, type_, reflected, compare_to):
-            return not (
-                isinstance(object_, ForeignKeyConstraint)
-                and type_ == "foreign_key_constraint"
-                and name == "fk1"
+        if hook_type == "object":
+
+            def include_object(object_, name, type_, reflected, compare_to):
+                return not (
+                    isinstance(object_, ForeignKeyConstraint)
+                    and type_ == "foreign_key_constraint"
+                    and name == "fk1"
+                )
+
+            diffs = self._fixture(m1, m2, object_filters=include_object)
+        elif hook_type == "name":
+
+            def include_name(name, type_, parent_names):
+                if type_ == "index":
+                    return True  # MariaDB thing
+
+                if name == "fk1":
+                    eq_(type_, "foreign_key_constraint")
+                    eq_(
+                        parent_names,
+                        {
+                            "schema_name": None,
+                            "table_name": "t",
+                            "schema_qualified_table_name": "t",
+                        },
+                    )
+                    return False
+                else:
+                    return True
+
+            diffs = self._fixture(m1, m2, name_filters=include_name)
+
+        if hook_type == "object":
+            self._assert_fk_diff(
+                diffs[0], "remove_fk", "t", ["y"], "ref_a", ["a"], name="fk2"
             )
-
-        diffs = self._fixture(m1, m2, object_filters=include_object)
-
-        self._assert_fk_diff(
-            diffs[0], "remove_fk", "t", ["y"], "ref_a", ["a"], name="fk2"
-        )
-        self._assert_fk_diff(
-            diffs[1],
-            "add_fk",
-            "t",
-            ["y", "z"],
-            "ref_b",
-            ["a", "b"],
-            name="fk2",
-        )
-        eq_(len(diffs), 2)
+            self._assert_fk_diff(
+                diffs[1],
+                "add_fk",
+                "t",
+                ["y", "z"],
+                "ref_b",
+                ["a", "b"],
+                name="fk2",
+            )
+            eq_(len(diffs), 2)
+        elif hook_type == "name":
+            eq_(
+                {(d[0], d[1].name) for d in diffs},
+                {("add_fk", "fk2"), ("add_fk", "fk1"), ("remove_fk", "fk2")},
+            )
 
 
 class AutogenerateFKOptionsTest(AutogenFixtureTest, TestBase):
     __backend__ = True
-    __requires__ = ("flexible_fk_cascades",)
 
     def _fk_opts_fixture(self, old_opts, new_opts):
         m1 = MetaData()
@@ -693,71 +810,55 @@ class AutogenerateFKOptionsTest(AutogenFixtureTest, TestBase):
 
         return self._fixture(m1, m2)
 
-    def _expect_opts_supported(self, deferrable=False, initially=False):
-        if not config.requirements.reflects_fk_options.enabled:
-            return False
-
-        if deferrable and not config.requirements.fk_deferrable.enabled:
-            return False
-
-        if initially and not config.requirements.fk_initially.enabled:
-            return False
-
-        return True
-
+    @config.requirements.fk_ondelete_is_reflected
     def test_add_ondelete(self):
         diffs = self._fk_opts_fixture({}, {"ondelete": "cascade"})
 
-        if self._expect_opts_supported():
-            self._assert_fk_diff(
-                diffs[0],
-                "remove_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                ondelete=None,
-                conditional_name="servergenerated",
-            )
+        self._assert_fk_diff(
+            diffs[0],
+            "remove_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            ondelete=None,
+            conditional_name="servergenerated",
+        )
 
-            self._assert_fk_diff(
-                diffs[1],
-                "add_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                ondelete="cascade",
-            )
-        else:
-            eq_(diffs, [])
+        self._assert_fk_diff(
+            diffs[1],
+            "add_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            ondelete="cascade",
+        )
 
+    @config.requirements.fk_ondelete_is_reflected
     def test_remove_ondelete(self):
         diffs = self._fk_opts_fixture({"ondelete": "CASCADE"}, {})
 
-        if self._expect_opts_supported():
-            self._assert_fk_diff(
-                diffs[0],
-                "remove_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                ondelete="CASCADE",
-                conditional_name="servergenerated",
-            )
+        self._assert_fk_diff(
+            diffs[0],
+            "remove_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            ondelete="CASCADE",
+            conditional_name="servergenerated",
+        )
 
-            self._assert_fk_diff(
-                diffs[1],
-                "add_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                ondelete=None,
-            )
-        else:
-            eq_(diffs, [])
+        self._assert_fk_diff(
+            diffs[1],
+            "add_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            ondelete=None,
+        )
 
     def test_nochange_ondelete(self):
         """test case sensitivity"""
@@ -766,60 +867,57 @@ class AutogenerateFKOptionsTest(AutogenFixtureTest, TestBase):
         )
         eq_(diffs, [])
 
+    @config.requirements.fk_onupdate_is_reflected
     def test_add_onupdate(self):
         diffs = self._fk_opts_fixture({}, {"onupdate": "cascade"})
 
-        if self._expect_opts_supported():
-            self._assert_fk_diff(
-                diffs[0],
-                "remove_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                onupdate=None,
-                conditional_name="servergenerated",
-            )
+        self._assert_fk_diff(
+            diffs[0],
+            "remove_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            onupdate=None,
+            conditional_name="servergenerated",
+        )
 
-            self._assert_fk_diff(
-                diffs[1],
-                "add_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                onupdate="cascade",
-            )
-        else:
-            eq_(diffs, [])
+        self._assert_fk_diff(
+            diffs[1],
+            "add_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            onupdate="cascade",
+        )
 
+    @config.requirements.fk_onupdate_is_reflected
     def test_remove_onupdate(self):
         diffs = self._fk_opts_fixture({"onupdate": "CASCADE"}, {})
 
-        if self._expect_opts_supported():
-            self._assert_fk_diff(
-                diffs[0],
-                "remove_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                onupdate="CASCADE",
-                conditional_name="servergenerated",
-            )
+        self._assert_fk_diff(
+            diffs[0],
+            "remove_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            onupdate="CASCADE",
+            conditional_name="servergenerated",
+        )
 
-            self._assert_fk_diff(
-                diffs[1],
-                "add_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                onupdate=None,
-            )
-        else:
-            eq_(diffs, [])
+        self._assert_fk_diff(
+            diffs[1],
+            "add_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            onupdate=None,
+        )
 
+    @config.requirements.fk_onupdate
     def test_nochange_onupdate(self):
         """test case sensitivity"""
         diffs = self._fk_opts_fixture(
@@ -827,6 +925,7 @@ class AutogenerateFKOptionsTest(AutogenFixtureTest, TestBase):
         )
         eq_(diffs, [])
 
+    @config.requirements.fk_ondelete_restrict
     def test_nochange_ondelete_restrict(self):
         """test the RESTRICT option which MySQL doesn't report on"""
 
@@ -835,6 +934,7 @@ class AutogenerateFKOptionsTest(AutogenFixtureTest, TestBase):
         )
         eq_(diffs, [])
 
+    @config.requirements.fk_onupdate_restrict
     def test_nochange_onupdate_restrict(self):
         """test the RESTRICT option which MySQL doesn't report on"""
 
@@ -843,6 +943,7 @@ class AutogenerateFKOptionsTest(AutogenFixtureTest, TestBase):
         )
         eq_(diffs, [])
 
+    @config.requirements.fk_ondelete_noaction
     def test_nochange_ondelete_noaction(self):
         """test the NO ACTION option which generally comes back as None"""
 
@@ -851,6 +952,7 @@ class AutogenerateFKOptionsTest(AutogenFixtureTest, TestBase):
         )
         eq_(diffs, [])
 
+    @config.requirements.fk_onupdate
     def test_nochange_onupdate_noaction(self):
         """test the NO ACTION option which generally comes back as None"""
 
@@ -859,6 +961,7 @@ class AutogenerateFKOptionsTest(AutogenFixtureTest, TestBase):
         )
         eq_(diffs, [])
 
+    @config.requirements.fk_ondelete_restrict
     def test_change_ondelete_from_restrict(self):
         """test the RESTRICT option which MySQL doesn't report on"""
 
@@ -867,32 +970,30 @@ class AutogenerateFKOptionsTest(AutogenFixtureTest, TestBase):
         diffs = self._fk_opts_fixture(
             {"ondelete": "restrict"}, {"ondelete": "cascade"}
         )
-        if self._expect_opts_supported():
-            self._assert_fk_diff(
-                diffs[0],
-                "remove_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                onupdate=None,
-                ondelete=mock.ANY,  # MySQL reports None, PG reports RESTRICT
-                conditional_name="servergenerated",
-            )
+        self._assert_fk_diff(
+            diffs[0],
+            "remove_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            onupdate=None,
+            ondelete=mock.ANY,  # MySQL reports None, PG reports RESTRICT
+            conditional_name="servergenerated",
+        )
 
-            self._assert_fk_diff(
-                diffs[1],
-                "add_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                onupdate=None,
-                ondelete="cascade",
-            )
-        else:
-            eq_(diffs, [])
+        self._assert_fk_diff(
+            diffs[1],
+            "add_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            onupdate=None,
+            ondelete="cascade",
+        )
 
+    @config.requirements.fk_ondelete_restrict
     def test_change_onupdate_from_restrict(self):
         """test the RESTRICT option which MySQL doesn't report on"""
 
@@ -901,63 +1002,59 @@ class AutogenerateFKOptionsTest(AutogenFixtureTest, TestBase):
         diffs = self._fk_opts_fixture(
             {"onupdate": "restrict"}, {"onupdate": "cascade"}
         )
-        if self._expect_opts_supported():
-            self._assert_fk_diff(
-                diffs[0],
-                "remove_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                onupdate=mock.ANY,  # MySQL reports None, PG reports RESTRICT
-                ondelete=None,
-                conditional_name="servergenerated",
-            )
+        self._assert_fk_diff(
+            diffs[0],
+            "remove_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            onupdate=mock.ANY,  # MySQL reports None, PG reports RESTRICT
+            ondelete=None,
+            conditional_name="servergenerated",
+        )
 
-            self._assert_fk_diff(
-                diffs[1],
-                "add_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                onupdate="cascade",
-                ondelete=None,
-            )
-        else:
-            eq_(diffs, [])
+        self._assert_fk_diff(
+            diffs[1],
+            "add_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            onupdate="cascade",
+            ondelete=None,
+        )
 
+    @config.requirements.fk_ondelete_is_reflected
+    @config.requirements.fk_onupdate_is_reflected
     def test_ondelete_onupdate_combo(self):
         diffs = self._fk_opts_fixture(
             {"onupdate": "CASCADE", "ondelete": "SET NULL"},
             {"onupdate": "RESTRICT", "ondelete": "RESTRICT"},
         )
 
-        if self._expect_opts_supported():
-            self._assert_fk_diff(
-                diffs[0],
-                "remove_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                onupdate="CASCADE",
-                ondelete="SET NULL",
-                conditional_name="servergenerated",
-            )
+        self._assert_fk_diff(
+            diffs[0],
+            "remove_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            onupdate="CASCADE",
+            ondelete="SET NULL",
+            conditional_name="servergenerated",
+        )
 
-            self._assert_fk_diff(
-                diffs[1],
-                "add_fk",
-                "user",
-                ["tid"],
-                "some_table",
-                ["id"],
-                onupdate="RESTRICT",
-                ondelete="RESTRICT",
-            )
-        else:
-            eq_(diffs, [])
+        self._assert_fk_diff(
+            diffs[1],
+            "add_fk",
+            "user",
+            ["tid"],
+            "some_table",
+            ["id"],
+            onupdate="RESTRICT",
+            ondelete="RESTRICT",
+        )
 
     @config.requirements.fk_initially
     def test_add_initially_deferred(self):
@@ -1124,7 +1221,7 @@ class AutogenerateFKOptionsTest(AutogenFixtureTest, TestBase):
             deferrable=True,
         )
 
-    @config.requirements.fk_deferrable
+    @config.requirements.fk_deferrable_is_reflected
     def test_remove_deferrable(self):
         diffs = self._fk_opts_fixture({"deferrable": True}, {})
 

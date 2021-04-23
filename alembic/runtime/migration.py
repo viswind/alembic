@@ -8,12 +8,13 @@ from sqlalchemy import MetaData
 from sqlalchemy import PrimaryKeyConstraint
 from sqlalchemy import String
 from sqlalchemy import Table
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Engine
 from sqlalchemy.engine import url as sqla_url
 from sqlalchemy.engine.strategies import MockEngineStrategy
 
 from .. import ddl
 from .. import util
+from ..util import sqla_compat
 from ..util.compat import callable
 from ..util.compat import EncodedIO
 
@@ -30,15 +31,18 @@ class _ProxyTransaction(object):
 
     def rollback(self):
         self._proxied_transaction.rollback()
+        self.migration_context._transaction = None
 
     def commit(self):
         self._proxied_transaction.commit()
+        self.migration_context._transaction = None
 
     def __enter__(self):
         return self
 
     def __exit__(self, type_, value, traceback):
         self._proxied_transaction.__exit__(type_, value, traceback)
+        self.migration_context._transaction = None
 
 
 class MigrationContext(object):
@@ -104,8 +108,13 @@ class MigrationContext(object):
         if as_sql:
             self.connection = self._stdout_connection(connection)
             assert self.connection is not None
+            self._in_external_transaction = False
         else:
             self.connection = connection
+            self._in_external_transaction = (
+                sqla_compat._get_connection_in_transaction(connection)
+            )
+
         self._migrations_fn = opts.get("fn")
         self.as_sql = as_sql
 
@@ -198,13 +207,13 @@ class MigrationContext(object):
             dialect_opts = {}
 
         if connection:
-            if not isinstance(connection, Connection):
-                util.warn(
+            if isinstance(connection, Engine):
+                raise util.CommandError(
                     "'connection' argument to configure() is expected "
                     "to be a sqlalchemy.engine.Connection instance, "
                     "got %r" % connection,
-                    stacklevel=3,
                 )
+
             dialect = connection.dialect
         elif url:
             url = sqla_url.make_url(url)
@@ -266,19 +275,27 @@ class MigrationContext(object):
         """
         _in_connection_transaction = self._in_connection_transaction()
 
-        if self.impl.transactional_ddl:
-            if self.as_sql:
-                self.impl.emit_commit()
+        if self.impl.transactional_ddl and self.as_sql:
+            self.impl.emit_commit()
 
-            elif _in_connection_transaction:
-                assert self._transaction is not None
+        elif _in_connection_transaction:
+            assert self._transaction is not None
 
-                self._transaction.commit()
-                self._transaction = None
+            self._transaction.commit()
+            self._transaction = None
 
         if not self.as_sql:
             current_level = self.connection.get_isolation_level()
-            self.connection.execution_options(isolation_level="AUTOCOMMIT")
+            base_connection = self.connection
+
+            # in 1.3 and 1.4 non-future mode, the connection gets switched
+            # out.  we can use the base connection with the new mode
+            # except that it will not know it's in "autocommit" and will
+            # emit deprecation warnings when an autocommit action takes
+            # place.
+            self.connection = (
+                self.impl.connection
+            ) = base_connection.execution_options(isolation_level="AUTOCOMMIT")
         try:
             yield
         finally:
@@ -286,13 +303,13 @@ class MigrationContext(object):
                 self.connection.execution_options(
                     isolation_level=current_level
                 )
+                self.connection = self.impl.connection = base_connection
 
-            if self.impl.transactional_ddl:
-                if self.as_sql:
-                    self.impl.emit_begin()
+            if self.impl.transactional_ddl and self.as_sql:
+                self.impl.emit_begin()
 
-                elif _in_connection_transaction:
-                    self._transaction = self.bind.begin()
+            elif _in_connection_transaction:
+                self._transaction = self.connection.begin()
 
     def begin_transaction(self, _per_migration=False):
         """Begin a logical transaction for migration operations.
@@ -335,23 +352,50 @@ class MigrationContext(object):
             :meth:`.MigrationContext.autocommit_block`
 
         """
-        transaction_now = _per_migration == self._transaction_per_migration
+
+        @contextmanager
+        def do_nothing():
+            yield
+
+        if self._in_external_transaction:
+            return do_nothing()
+
+        if self.impl.transactional_ddl:
+            transaction_now = _per_migration == self._transaction_per_migration
+        else:
+            transaction_now = _per_migration is True
 
         if not transaction_now:
-
-            @contextmanager
-            def do_nothing():
-                yield
-
             return do_nothing()
 
         elif not self.impl.transactional_ddl:
+            assert _per_migration
 
-            @contextmanager
-            def do_nothing():
-                yield
+            if self.as_sql:
+                return do_nothing()
+            else:
+                # track our own notion of a "transaction block", which must be
+                # committed when complete.   Don't rely upon whether or not the
+                # SQLAlchemy connection reports as "in transaction"; this
+                # because SQLAlchemy future connection features autobegin
+                # behavior, so it may already be in a transaction from our
+                # emitting of queries like "has_version_table", etc. While we
+                # could track these operations as well, that leaves open the
+                # possibility of new operations or other things happening in
+                # the user environment that still may be triggering
+                # "autobegin".
 
-            return do_nothing()
+                in_transaction = self._transaction is not None
+
+                if in_transaction:
+                    return do_nothing()
+                else:
+                    self._transaction = (
+                        sqla_compat._safe_begin_connection_transaction(
+                            self.connection
+                        )
+                    )
+                    return _ProxyTransaction(self)
         elif self.as_sql:
 
             @contextmanager
@@ -362,7 +406,9 @@ class MigrationContext(object):
 
             return begin_commit()
         else:
-            self._transaction = self.bind.begin()
+            self._transaction = sqla_compat._safe_begin_connection_transaction(
+                self.connection
+            )
             return _ProxyTransaction(self)
 
     def get_current_revision(self):
@@ -409,8 +455,6 @@ class MigrationContext(object):
         If no version table is present, or if there are no revisions
         present, an empty tuple is returned.
 
-        .. versionadded:: 0.7.0
-
         """
         if self.as_sql:
             start_from_rev = self._start_from_rev
@@ -437,12 +481,13 @@ class MigrationContext(object):
         )
 
     def _ensure_version_table(self, purge=False):
-        self._version.create(self.connection, checkfirst=True)
-        if purge:
-            self.connection.execute(self._version.delete())
+        with sqla_compat._ensure_scope_for_ddl(self.connection):
+            self._version.create(self.connection, checkfirst=True)
+            if purge:
+                self.connection.execute(self._version.delete())
 
     def _has_version_table(self):
-        return self.connection.dialect.has_table(
+        return sqla_compat._connectable_has_table(
             self.connection, self.version_table, self.version_table_schema
         )
 
@@ -453,8 +498,6 @@ class MigrationContext(object):
         can apply, and updates those branches as though they were migrated
         towards that revision (either up or down).  If no current branches
         include the revision, it is added as a new branch head.
-
-        .. versionadded:: 0.7.0
 
         """
         heads = self.get_current_heads()
@@ -495,17 +538,16 @@ class MigrationContext(object):
         else:
             heads = self.get_current_heads()
 
-            if not self.as_sql and not heads:
+            dont_mutate = self.opts.get("dont_mutate", False)
+
+            if not self.as_sql and not heads and not dont_mutate:
                 self._ensure_version_table()
 
         head_maintainer = HeadMaintainer(self, heads)
 
-        starting_in_transaction = (
-            not self.as_sql and self._in_connection_transaction()
-        )
-
         for step in self._migrations_fn(heads, self):
             with self.begin_transaction(_per_migration=True):
+
                 if self.as_sql and not head_maintainer.heads:
                     # for offline mode, include a CREATE TABLE from
                     # the base
@@ -530,18 +572,6 @@ class MigrationContext(object):
                         heads=set(head_maintainer.heads),
                         run_args=kw,
                     )
-
-            if (
-                not starting_in_transaction
-                and not self.as_sql
-                and not self.impl.transactional_ddl
-                and self._in_connection_transaction()
-            ):
-                raise util.CommandError(
-                    'Migration "%s" has left an uncommitted '
-                    "transaction opened; transactional_ddl is False so "
-                    "Alembic is not committing transactions" % step
-                )
 
         if self.as_sql and not head_maintainer.heads:
             self._version.drop(self.connection)
@@ -594,11 +624,9 @@ class MigrationContext(object):
 
     @property
     def config(self):
-        """Return the :class:`.Config` used by the current environment, if any.
+        """Return the :class:`.Config` used by the current environment,
+        if any."""
 
-        .. versionadded:: 0.6.6
-
-        """
         if self.environment_context:
             return self.environment_context.config
         else:
@@ -766,8 +794,6 @@ class MigrationInfo(object):
     benefit of the :paramref:`.EnvironmentContext.on_version_apply`
     callback hook.
 
-    .. versionadded:: 0.9.3
-
     """
 
     is_upgrade = None
@@ -800,8 +826,6 @@ class MigrationInfo(object):
     It can be multiple revision identifiers only in the case of an
     ``alembic stamp`` operation which is moving downwards from multiple
     branches down to their common branch point.
-
-    .. versionadded:: 0.9.4
 
     """
 
@@ -866,11 +890,8 @@ class MigrationInfo(object):
 
     @property
     def up_revisions(self):
-        """Get :attr:`~.MigrationInfo.up_revision_ids` as a :class:`.Revision`.
-
-        .. versionadded:: 0.9.4
-
-        """
+        """Get :attr:`~.MigrationInfo.up_revision_ids` as a
+        :class:`.Revision`."""
         return self.revision_map.get_revisions(self.up_revision_ids)
 
     @property
@@ -959,7 +980,7 @@ class RevisionStep(MigrationStep):
     @property
     def from_revisions(self):
         if self.is_upgrade:
-            return self.revision._all_down_revisions
+            return self.revision._normalized_down_revisions
         else:
             return (self.revision.revision,)
 
@@ -975,7 +996,7 @@ class RevisionStep(MigrationStep):
         if self.is_upgrade:
             return (self.revision.revision,)
         else:
-            return self.revision._all_down_revisions
+            return self.revision._normalized_down_revisions
 
     @property
     def to_revisions_no_deps(self):
@@ -986,7 +1007,7 @@ class RevisionStep(MigrationStep):
 
     @property
     def _has_scalar_down_revision(self):
-        return len(self.revision._all_down_revisions) == 1
+        return len(self.revision._normalized_down_revisions) == 1
 
     def should_delete_branch(self, heads):
         """A delete is when we are a. in a downgrade and b.
@@ -1000,7 +1021,7 @@ class RevisionStep(MigrationStep):
         if self.revision.revision not in heads:
             return False
 
-        downrevs = self.revision._all_down_revisions
+        downrevs = self.revision._normalized_down_revisions
 
         if not downrevs:
             # is a base
@@ -1061,7 +1082,7 @@ class RevisionStep(MigrationStep):
         if not self.is_upgrade:
             return False
 
-        downrevs = self.revision._all_down_revisions
+        downrevs = self.revision._normalized_down_revisions
 
         if not downrevs:
             # is a base
@@ -1080,7 +1101,7 @@ class RevisionStep(MigrationStep):
         if not self.is_upgrade:
             return False
 
-        downrevs = self.revision._all_down_revisions
+        downrevs = self.revision._normalized_down_revisions
 
         if len(downrevs) > 1 and len(heads.intersection(downrevs)) > 1:
             return True
@@ -1091,7 +1112,7 @@ class RevisionStep(MigrationStep):
         if not self.is_downgrade:
             return False
 
-        downrevs = self.revision._all_down_revisions
+        downrevs = self.revision._normalized_down_revisions
 
         if self.revision.revision in heads and len(downrevs) > 1:
             return True
@@ -1100,13 +1121,15 @@ class RevisionStep(MigrationStep):
 
     def update_version_num(self, heads):
         if not self._has_scalar_down_revision:
-            downrev = heads.intersection(self.revision._all_down_revisions)
+            downrev = heads.intersection(
+                self.revision._normalized_down_revisions
+            )
             assert (
                 len(downrev) == 1
             ), "Can't do an UPDATE because downrevision is ambiguous"
             down_revision = list(downrev)[0]
         else:
-            down_revision = self.revision._all_down_revisions[0]
+            down_revision = self.revision._normalized_down_revisions[0]
 
         if self.is_upgrade:
             return down_revision, self.revision.revision
@@ -1126,7 +1149,7 @@ class RevisionStep(MigrationStep):
         return MigrationInfo(
             revision_map=self.revision_map,
             up_revisions=self.revision.revision,
-            down_revisions=self.revision._all_down_revisions,
+            down_revisions=self.revision._normalized_down_revisions,
             is_upgrade=self.is_upgrade,
             is_stamp=False,
         )

@@ -2,6 +2,7 @@ from sqlalchemy import BigInteger
 from sqlalchemy import Boolean
 from sqlalchemy import Column
 from sqlalchemy import DateTime
+from sqlalchemy import exc
 from sqlalchemy import Float
 from sqlalchemy import func
 from sqlalchemy import Index
@@ -34,9 +35,10 @@ from alembic.autogenerate.compare import _compare_server_default
 from alembic.autogenerate.compare import _compare_tables
 from alembic.autogenerate.compare import _render_server_default_for_compare
 from alembic.migration import MigrationContext
-from alembic.operations import Operations
 from alembic.operations import ops
 from alembic.script import ScriptDirectory
+from alembic.testing import assert_raises_message
+from alembic.testing import combinations
 from alembic.testing import config
 from alembic.testing import eq_
 from alembic.testing import eq_ignore_whitespace
@@ -47,6 +49,7 @@ from alembic.testing.env import staging_env
 from alembic.testing.env import write_script
 from alembic.testing.fixtures import capture_context_buffer
 from alembic.testing.fixtures import op_fixture
+from alembic.testing.fixtures import TablesTest
 from alembic.testing.fixtures import TestBase
 from alembic.util import sqla_compat
 
@@ -155,7 +158,6 @@ class PostgresqlOpTest(TestBase):
             'USING gist ("SomeColumn" WITH >) WHERE ("SomeColumn" > 5)'
         )
 
-    @config.requirements.comments_api
     def test_add_column_with_comment(self):
         context = op_fixture("postgresql")
         op.add_column("t", Column("q", Integer, comment="This is a comment"))
@@ -164,7 +166,6 @@ class PostgresqlOpTest(TestBase):
             "COMMENT ON COLUMN t.q IS 'This is a comment'",
         )
 
-    @config.requirements.comments_api
     def test_alter_column_with_comment(self):
         context = op_fixture("postgresql")
         op.alter_column(
@@ -181,7 +182,6 @@ class PostgresqlOpTest(TestBase):
             "COMMENT ON COLUMN foo.t.c IS 'This is a column comment'",
         )
 
-    @config.requirements.comments_api
     def test_alter_column_add_comment(self):
         context = op_fixture("postgresql")
         op.alter_column(
@@ -196,7 +196,6 @@ class PostgresqlOpTest(TestBase):
             "COMMENT ON COLUMN foo.t.c IS 'This is a column comment'"
         )
 
-    @config.requirements.comments_api
     def test_alter_column_add_comment_table_and_column_quoting(self):
         context = op_fixture("postgresql")
         op.alter_column(
@@ -211,7 +210,6 @@ class PostgresqlOpTest(TestBase):
             'COMMENT ON COLUMN foo."T"."C" IS \'This is a column comment\''
         )
 
-    @config.requirements.comments_api
     def test_alter_column_add_comment_quoting(self):
         context = op_fixture("postgresql")
         op.alter_column(
@@ -226,7 +224,6 @@ class PostgresqlOpTest(TestBase):
             "COMMENT ON COLUMN foo.t.c IS 'This is a column ''comment'''"
         )
 
-    @config.requirements.comments_api
     def test_alter_column_drop_comment(self):
         context = op_fixture("postgresql")
         op.alter_column(
@@ -240,7 +237,6 @@ class PostgresqlOpTest(TestBase):
 
         context.assert_("COMMENT ON COLUMN foo.t.c IS NULL")
 
-    @config.requirements.comments_api
     def test_create_table_with_comment(self):
         context = op_fixture("postgresql")
         op.create_table(
@@ -255,7 +251,6 @@ class PostgresqlOpTest(TestBase):
             "COMMENT ON TABLE t2 IS 't2 comment'",
         )
 
-    @config.requirements.comments_api
     def test_create_table_with_column_comments(self):
         context = op_fixture("postgresql")
         op.create_table(
@@ -272,21 +267,19 @@ class PostgresqlOpTest(TestBase):
             "COMMENT ON COLUMN t2.c2 IS 'c2 comment'",
         )
 
-    @config.requirements.comments_api
     def test_create_table_comment(self):
         # this is handled by SQLAlchemy's compilers
         context = op_fixture("postgresql")
         op.create_table_comment("t2", comment="t2 table", schema="foo")
         context.assert_("COMMENT ON TABLE foo.t2 IS 't2 table'")
 
-    @config.requirements.comments_api
     def test_drop_table_comment(self):
         # this is handled by SQLAlchemy's compilers
         context = op_fixture("postgresql")
         op.drop_table_comment("t2", existing_comment="t2 table", schema="foo")
         context.assert_("COMMENT ON TABLE foo.t2 IS NULL")
 
-    @config.requirements.computed_columns_api
+    @config.requirements.computed_columns
     def test_add_column_computed(self):
         context = op_fixture("postgresql")
         op.add_column(
@@ -298,6 +291,134 @@ class PostgresqlOpTest(TestBase):
             "INTEGER GENERATED ALWAYS AS (foo * 5) STORED"
         )
 
+    @combinations(
+        (lambda: sqla_compat.Computed("foo * 5"), lambda: None),
+        (lambda: None, lambda: sqla_compat.Computed("foo * 5")),
+        (
+            lambda: sqla_compat.Computed("foo * 42"),
+            lambda: sqla_compat.Computed("foo * 5"),
+        ),
+    )
+    @config.requirements.computed_columns
+    def test_alter_column_computed_not_supported(self, sd, esd):
+        op_fixture("postgresql")
+        assert_raises_message(
+            exc.CompileError,
+            'Adding or removing a "computed" construct, e.g. '
+            "GENERATED ALWAYS AS, to or from an existing column is not "
+            "supported.",
+            op.alter_column,
+            "t1",
+            "c1",
+            server_default=sd(),
+            existing_server_default=esd(),
+        )
+
+    @config.requirements.identity_columns
+    @combinations(
+        ({}, None),
+        (dict(always=True), None),
+        (
+            dict(start=3, increment=33, maxvalue=99, cycle=True),
+            "INCREMENT BY 33 START WITH 3 MAXVALUE 99 CYCLE",
+        ),
+    )
+    def test_add_column_identity(self, kw, text):
+        context = op_fixture("postgresql")
+        op.add_column(
+            "t1",
+            Column("some_column", Integer, sqla_compat.Identity(**kw)),
+        )
+        qualification = "ALWAYS" if kw.get("always", False) else "BY DEFAULT"
+        options = " (%s)" % text if text else ""
+        context.assert_(
+            "ALTER TABLE t1 ADD COLUMN some_column "
+            "INTEGER GENERATED %s AS IDENTITY%s" % (qualification, options)
+        )
+
+    @config.requirements.identity_columns
+    @combinations(
+        ({}, None),
+        (dict(always=True), None),
+        (
+            dict(start=3, increment=33, maxvalue=99, cycle=True),
+            "INCREMENT BY 33 START WITH 3 MAXVALUE 99 CYCLE",
+        ),
+    )
+    def test_add_identity_to_column(self, kw, text):
+        context = op_fixture("postgresql")
+        op.alter_column(
+            "t1",
+            "some_column",
+            server_default=sqla_compat.Identity(**kw),
+            existing_server_default=None,
+        )
+        qualification = "ALWAYS" if kw.get("always", False) else "BY DEFAULT"
+        options = " (%s)" % text if text else ""
+        context.assert_(
+            "ALTER TABLE t1 ALTER COLUMN some_column ADD "
+            "GENERATED %s AS IDENTITY%s" % (qualification, options)
+        )
+
+    @config.requirements.identity_columns
+    def test_remove_identity_from_column(self):
+        context = op_fixture("postgresql")
+        op.alter_column(
+            "t1",
+            "some_column",
+            server_default=None,
+            existing_server_default=sqla_compat.Identity(),
+        )
+        context.assert_(
+            "ALTER TABLE t1 ALTER COLUMN some_column DROP IDENTITY"
+        )
+
+    @config.requirements.identity_columns
+    @combinations(
+        ({}, dict(always=True), "SET GENERATED ALWAYS"),
+        (
+            dict(always=True),
+            dict(always=False, start=3),
+            "SET GENERATED BY DEFAULT SET START WITH 3",
+        ),
+        (
+            dict(always=True, start=3, increment=2, minvalue=-3, maxvalue=99),
+            dict(
+                always=True,
+                start=3,
+                increment=1,
+                minvalue=-3,
+                maxvalue=99,
+                cycle=True,
+            ),
+            "SET CYCLE SET INCREMENT BY 1",
+        ),
+        (
+            dict(
+                always=False,
+                start=3,
+                maxvalue=9999,
+                minvalue=0,
+            ),
+            dict(always=False, start=3, order=True, on_null=False, cache=2),
+            "SET CACHE 2",
+        ),
+        (
+            dict(always=False),
+            dict(always=None, minvalue=0),
+            "SET MINVALUE 0",
+        ),
+    )
+    def test_change_identity_in_column(self, existing, updated, text):
+        context = op_fixture("postgresql")
+        op.alter_column(
+            "t1",
+            "some_column",
+            server_default=sqla_compat.Identity(**updated),
+            existing_server_default=sqla_compat.Identity(**existing),
+        )
+        context.assert_("ALTER TABLE t1 ALTER COLUMN some_column %s" % text)
+
 
 class PGAutocommitBlockTest(TestBase):
     __only_on__ = "postgresql"
@@ -307,17 +428,20 @@ class PGAutocommitBlockTest(TestBase):
         self.conn = conn = config.db.connect()
 
         with conn.begin():
-            conn.execute("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');")
+            conn.execute(
+                text("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')")
+            )
 
     def tearDown(self):
         with self.conn.begin():
-            self.conn.execute("DROP TYPE mood")
+            self.conn.execute(text("DROP TYPE mood"))
 
-    def test_alter_enum(self):
-        context = MigrationContext.configure(connection=self.conn)
-        with context.begin_transaction(_per_migration=True):
-            with context.autocommit_block():
-                context.execute("ALTER TYPE mood ADD VALUE 'soso'")
+    def test_alter_enum(self, migration_context):
+        with migration_context.begin_transaction(_per_migration=True):
+            with migration_context.autocommit_block():
+                migration_context.execute(
+                    text("ALTER TYPE mood ADD VALUE 'soso'")
+                )
 
 
 class PGOfflineEnumTest(TestBase):
@@ -423,53 +547,39 @@ def downgrade():
         assert "DROP TYPE pgenum" in buf.getvalue()
 
 
-class PostgresqlInlineLiteralTest(TestBase):
+class PostgresqlInlineLiteralTest(TablesTest):
     __only_on__ = "postgresql"
     __backend__ = True
 
     @classmethod
-    def setup_class(cls):
-        cls.bind = config.db
-        cls.bind.execute(
-            """
-            create table tab (
-                col varchar(50)
-            )
-        """
-        )
-        cls.bind.execute(
-            """
-            insert into tab (col) values
-                ('old data 1'),
-                ('old data 2.1'),
-                ('old data 3')
-        """
-        )
+    def define_tables(cls, metadata):
+        Table("tab", metadata, Column("col", String(50)))
 
     @classmethod
-    def teardown_class(cls):
-        cls.bind.execute("drop table tab")
+    def insert_data(cls, connection):
+        connection.execute(
+            text(
+                """
+                insert into tab (col) values
+                    ('old data 1'),
+                    ('old data 2.1'),
+                    ('old data 3')
+            """
+            )
+        )
 
-    def setUp(self):
-        self.conn = self.bind.connect()
-        ctx = MigrationContext.configure(self.conn)
-        self.op = Operations(ctx)
-
-    def tearDown(self):
-        self.conn.close()
-
-    def test_inline_percent(self):
+    def test_inline_percent(self, connection, ops_context):
         # TODO: here's the issue, you need to escape this.
         tab = table("tab", column("col"))
-        self.op.execute(
+        ops_context.execute(
             tab.update()
-            .where(tab.c.col.like(self.op.inline_literal("%.%")))
-            .values(col=self.op.inline_literal("new data")),
+            .where(tab.c.col.like(ops_context.inline_literal("%.%")))
+            .values(col=ops_context.inline_literal("new data")),
             execution_options={"no_parameters": True},
         )
         eq_(
-            self.conn.execute(
-                "select count(*) from tab where col='new data'"
+            connection.execute(
+                text("select count(*) from tab where col='new data'")
             ).scalar(),
             1,
         )
@@ -489,7 +599,7 @@ class PostgresqlDefaultCompareTest(TestBase):
         )
 
     def setUp(self):
-        self.metadata = MetaData(self.bind)
+        self.metadata = MetaData()
         self.autogen_context = api.AutogenContext(self.migration_context)
 
     @classmethod
@@ -497,7 +607,8 @@ class PostgresqlDefaultCompareTest(TestBase):
         clear_staging_env()
 
     def tearDown(self):
-        self.metadata.drop_all()
+        with config.db.begin() as conn:
+            self.metadata.drop_all(conn)
 
     def _compare_default_roundtrip(
         self, type_, orig_default, alternate=None, diff_expected=None

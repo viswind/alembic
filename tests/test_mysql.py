@@ -1,6 +1,8 @@
 from sqlalchemy import Boolean
 from sqlalchemy import Column
 from sqlalchemy import DATETIME
+from sqlalchemy import exc
+from sqlalchemy import Float
 from sqlalchemy import func
 from sqlalchemy import inspect
 from sqlalchemy import Integer
@@ -11,8 +13,12 @@ from sqlalchemy import TIMESTAMP
 
 from alembic import op
 from alembic import util
+from alembic.autogenerate import api
+from alembic.autogenerate import compare
 from alembic.migration import MigrationContext
+from alembic.operations import ops
 from alembic.testing import assert_raises_message
+from alembic.testing import combinations
 from alembic.testing import config
 from alembic.testing.env import clear_staging_env
 from alembic.testing.env import staging_env
@@ -23,7 +29,6 @@ from alembic.util import sqla_compat
 
 
 class MySQLOpTest(TestBase):
-    @config.requirements.comments_api
     def test_create_table_with_comment(self):
         context = op_fixture("mysql")
         op.create_table(
@@ -33,7 +38,6 @@ class MySQLOpTest(TestBase):
         )
         context.assert_contains("COMMENT='This is a table comment'")
 
-    @config.requirements.comments_api
     def test_create_table_with_column_comments(self):
         context = op_fixture("mysql")
         op.create_table(
@@ -52,7 +56,6 @@ class MySQLOpTest(TestBase):
             "COMMENT='This is a table comment'"
         )
 
-    @config.requirements.comments_api
     def test_add_column_with_comment(self):
         context = op_fixture("mysql")
         op.add_column("t", Column("q", Integer, comment="This is a comment"))
@@ -197,6 +200,35 @@ class MySQLOpTest(TestBase):
             "ALTER TABLE t CHANGE c c DATETIME NULL DEFAULT CURRENT_TIMESTAMP"
         )
 
+    def test_alter_column_modify_programmatic_default(self):
+        # test issue #736
+        # when autogenerate.compare creates the operation object
+        # programmatically, the server_default of the op has the full
+        # DefaultClause present.   make sure the usual renderer works.
+        context = op_fixture("mysql")
+
+        m1 = MetaData()
+
+        autogen_context = api.AutogenContext(context, m1)
+
+        operation = ops.AlterColumnOp("t", "c")
+        for fn in (
+            compare._compare_nullable,
+            compare._compare_type,
+            compare._compare_server_default,
+        ):
+            fn(
+                autogen_context,
+                operation,
+                None,
+                "t",
+                "c",
+                Column("c", Float(), nullable=False, server_default=text("0")),
+                Column("c", Float(), nullable=True, default=0),
+            )
+        op.invoke(operation)
+        context.assert_("ALTER TABLE t MODIFY c FLOAT NULL DEFAULT 0")
+
     def test_col_not_nullable(self):
         context = op_fixture("mysql")
         op.alter_column("t1", "c1", nullable=False, existing_type=Integer)
@@ -248,7 +280,6 @@ class MySQLOpTest(TestBase):
             server_default="q",
         )
 
-    @config.requirements.comments_api
     def test_alter_column_add_comment(self):
         context = op_fixture("mysql")
         op.alter_column(
@@ -264,7 +295,6 @@ class MySQLOpTest(TestBase):
             "COMMENT 'This is a column comment'"
         )
 
-    @config.requirements.comments_api
     def test_alter_column_add_comment_quoting(self):
         context = op_fixture("mysql")
         op.alter_column(
@@ -280,7 +310,6 @@ class MySQLOpTest(TestBase):
             "COMMENT 'This is a ''column'' comment'"
         )
 
-    @config.requirements.comments_api
     def test_alter_column_drop_comment(self):
         context = op_fixture("mysql")
         op.alter_column(
@@ -294,7 +323,6 @@ class MySQLOpTest(TestBase):
 
         context.assert_("ALTER TABLE foo.t MODIFY c BOOL NULL")
 
-    @config.requirements.comments_api
     def test_alter_column_existing_comment(self):
         context = op_fixture("mysql")
         op.alter_column(
@@ -310,7 +338,6 @@ class MySQLOpTest(TestBase):
             "COMMENT 'existing column comment'"
         )
 
-    @config.requirements.comments_api
     def test_rename_column_existing_comment(self):
         context = op_fixture("mysql")
         op.alter_column(
@@ -327,7 +354,6 @@ class MySQLOpTest(TestBase):
             "COMMENT 'existing column comment'"
         )
 
-    @config.requirements.comments_api
     def test_alter_column_new_comment_replaces_existing(self):
         context = op_fixture("mysql")
         op.alter_column(
@@ -344,15 +370,12 @@ class MySQLOpTest(TestBase):
             "COMMENT 'This is a column comment'"
         )
 
-    @config.requirements.comments_api
     def test_create_table_comment(self):
         # this is handled by SQLAlchemy's compilers
         context = op_fixture("mysql")
         op.create_table_comment("t2", comment="t2 table", schema="foo")
         context.assert_("ALTER TABLE foo.t2 COMMENT 't2 table'")
 
-    @config.requirements.comments_api
-    @config.requirements.sqlalchemy_issue_4436
     def test_drop_table_comment(self):
         # this is handled by SQLAlchemy's compilers
         context = op_fixture("mysql")
@@ -439,9 +462,55 @@ class MySQLOpTest(TestBase):
             "t1",
         )
 
+    @combinations(
+        (lambda: sqla_compat.Computed("foo * 5"), lambda: None),
+        (lambda: None, lambda: sqla_compat.Computed("foo * 5")),
+        (
+            lambda: sqla_compat.Computed("foo * 42"),
+            lambda: sqla_compat.Computed("foo * 5"),
+        ),
+    )
+    @config.requirements.computed_columns_api
+    def test_alter_column_computed_not_supported(self, sd, esd):
+        op_fixture("mssql")
+        assert_raises_message(
+            exc.CompileError,
+            'Adding or removing a "computed" construct, e.g. '
+            "GENERATED ALWAYS AS, to or from an existing column is not "
+            "supported.",
+            op.alter_column,
+            "t1",
+            "c1",
+            server_default=sd(),
+            existing_server_default=esd(),
+        )
+
+    @combinations(
+        (lambda: sqla_compat.Identity(), lambda: None),
+        (lambda: None, lambda: sqla_compat.Identity()),
+        (
+            lambda: sqla_compat.Identity(),
+            lambda: sqla_compat.Identity(),
+        ),
+    )
+    @config.requirements.identity_columns_api
+    def test_alter_column_identity_not_supported(self, sd, esd):
+        op_fixture()
+        assert_raises_message(
+            exc.CompileError,
+            'Adding, removing or modifying an "identity" construct, '
+            "e.g. GENERATED AS IDENTITY, to or from an existing "
+            "column is not supported in this dialect.",
+            op.alter_column,
+            "t1",
+            "c1",
+            server_default=sd(),
+            existing_server_default=esd(),
+        )
+
 
 class MySQLBackendOpTest(AlterColRoundTripFixture, TestBase):
-    __only_on__ = "mysql"
+    __only_on__ = "mysql", "mariadb"
     __backend__ = True
 
     def test_add_timestamp_server_default_current_timestamp(self):
@@ -470,7 +539,7 @@ class MySQLBackendOpTest(AlterColRoundTripFixture, TestBase):
         )
 
     def test_add_timestamp_server_default_current_timestamp_bundle_onupdate(
-        self
+        self,
     ):
         # note SQLAlchemy reflection bundles the ON UPDATE part into the
         # server default reflection see
@@ -485,7 +554,7 @@ class MySQLBackendOpTest(AlterColRoundTripFixture, TestBase):
         )
 
     def test_add_datetime_server_default_current_timestamp_bundle_onupdate(
-        self
+        self,
     ):
         # note SQLAlchemy reflection bundles the ON UPDATE part into the
         # server default reflection see
@@ -501,10 +570,8 @@ class MySQLBackendOpTest(AlterColRoundTripFixture, TestBase):
 
 
 class MySQLDefaultCompareTest(TestBase):
-    __only_on__ = "mysql"
+    __only_on__ = "mysql", "mariadb"
     __backend__ = True
-
-    __requires__ = ("mysql_timestamp_reflection",)
 
     @classmethod
     def setup_class(cls):
@@ -527,10 +594,11 @@ class MySQLDefaultCompareTest(TestBase):
         clear_staging_env()
 
     def setUp(self):
-        self.metadata = MetaData(self.bind)
+        self.metadata = MetaData()
 
     def tearDown(self):
-        self.metadata.drop_all()
+        with config.db.begin() as conn:
+            self.metadata.drop_all(conn)
 
     def _compare_default_roundtrip(self, type_, txt, alternate=None):
         if alternate:
@@ -559,7 +627,7 @@ class MySQLDefaultCompareTest(TestBase):
         insp = inspect(self.bind)
         cols = insp.get_columns(t1.name)
         refl = Table(t1.name, MetaData())
-        insp.reflecttable(refl, None)
+        sqla_compat._reflect_table(insp, refl, None)
         ctx = self.autogen_context["context"]
         return ctx.impl.compare_server_default(
             refl.c[cols[0]["name"]], col, rendered, cols[0]["default"]

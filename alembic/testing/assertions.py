@@ -1,11 +1,13 @@
 from __future__ import absolute_import
 
+import contextlib
 import re
+import sys
 
+from sqlalchemy import exc as sa_exc
+from sqlalchemy import util
 from sqlalchemy.engine import default
 from sqlalchemy.testing.assertions import _expect_warnings
-from sqlalchemy.testing.assertions import assert_raises  # noqa
-from sqlalchemy.testing.assertions import assert_raises_message  # noqa
 from sqlalchemy.testing.assertions import eq_  # noqa
 from sqlalchemy.testing.assertions import is_  # noqa
 from sqlalchemy.testing.assertions import is_false  # noqa
@@ -14,7 +16,96 @@ from sqlalchemy.testing.assertions import is_true  # noqa
 from sqlalchemy.testing.assertions import ne_  # noqa
 from sqlalchemy.util import decorator
 
+from ..util import sqla_compat
 from ..util.compat import py3k
+
+
+def _assert_proper_exception_context(exception):
+    """assert that any exception we're catching does not have a __context__
+    without a __cause__, and that __suppress_context__ is never set.
+
+    Python 3 will report nested as exceptions as "during the handling of
+    error X, error Y occurred". That's not what we want to do.  we want
+    these exceptions in a cause chain.
+
+    """
+
+    if not util.py3k:
+        return
+
+    if (
+        exception.__context__ is not exception.__cause__
+        and not exception.__suppress_context__
+    ):
+        assert False, (
+            "Exception %r was correctly raised but did not set a cause, "
+            "within context %r as its cause."
+            % (exception, exception.__context__)
+        )
+
+
+def assert_raises(except_cls, callable_, *args, **kw):
+    return _assert_raises(except_cls, callable_, args, kw, check_context=True)
+
+
+def assert_raises_context_ok(except_cls, callable_, *args, **kw):
+    return _assert_raises(except_cls, callable_, args, kw)
+
+
+def assert_raises_message(except_cls, msg, callable_, *args, **kwargs):
+    return _assert_raises(
+        except_cls, callable_, args, kwargs, msg=msg, check_context=True
+    )
+
+
+def assert_raises_message_context_ok(
+    except_cls, msg, callable_, *args, **kwargs
+):
+    return _assert_raises(except_cls, callable_, args, kwargs, msg=msg)
+
+
+def _assert_raises(
+    except_cls, callable_, args, kwargs, msg=None, check_context=False
+):
+
+    with _expect_raises(except_cls, msg, check_context) as ec:
+        callable_(*args, **kwargs)
+    return ec.error
+
+
+class _ErrorContainer(object):
+    error = None
+
+
+@contextlib.contextmanager
+def _expect_raises(except_cls, msg=None, check_context=False):
+    ec = _ErrorContainer()
+    if check_context:
+        are_we_already_in_a_traceback = sys.exc_info()[0]
+    try:
+        yield ec
+        success = False
+    except except_cls as err:
+        ec.error = err
+        success = True
+        if msg is not None:
+            assert re.search(
+                msg, util.text_type(err), re.UNICODE
+            ), "%r !~ %s" % (msg, err)
+        if check_context and not are_we_already_in_a_traceback:
+            _assert_proper_exception_context(err)
+        print(util.text_type(err).encode("utf-8"))
+
+    # assert outside the block so it works for AssertionError too !
+    assert success, "Callable did not raise an exception"
+
+
+def expect_raises(except_cls, check_context=True):
+    return _expect_raises(except_cls, check_context=check_context)
+
+
+def expect_raises_message(except_cls, msg, check_context=True):
+    return _expect_raises(except_cls, msg=msg, check_context=check_context)
 
 
 def eq_ignore_whitespace(a, b, msg=None):
@@ -43,14 +134,9 @@ def _get_dialect(name):
     if name is None or name == "default":
         return default.DefaultDialect()
     else:
-        try:
-            dialect_mod = _dialect_mods[name]
-        except KeyError:
-            dialect_mod = getattr(
-                __import__("sqlalchemy.dialects.%s" % name).dialects, name
-            )
-            _dialect_mods[name] = dialect_mod
-        d = dialect_mod.dialect()
+
+        d = sqla_compat._create_url(name).get_dialect()()
+
         if name == "postgresql":
             d.implicit_returning = True
         elif name == "mssql":
@@ -88,3 +174,11 @@ def emits_python_deprecation_warning(*messages):
             return fn(*args, **kw)
 
     return decorate
+
+
+def expect_sqlalchemy_deprecated(*messages, **kw):
+    return _expect_warnings(sa_exc.SADeprecationWarning, messages, **kw)
+
+
+def expect_sqlalchemy_deprecated_20(*messages, **kw):
+    return _expect_warnings(sa_exc.RemovedIn20Warning, messages, **kw)

@@ -1,6 +1,7 @@
 from collections import namedtuple
 import re
 
+from sqlalchemy import cast
 from sqlalchemy import schema
 from sqlalchemy import text
 
@@ -22,8 +23,7 @@ class ImplMeta(type):
 
 _impls = {}
 
-
-Params = namedtuple("Params", ["type", "args", "kwargs"])
+Params = namedtuple("Params", ["token0", "tokens", "args", "kwargs"])
 
 
 class DefaultImpl(with_metaclass(ImplMeta)):
@@ -45,6 +45,9 @@ class DefaultImpl(with_metaclass(ImplMeta)):
     transactional_ddl = False
     command_terminator = ";"
     type_synonyms = ({"NUMERIC", "DECIMAL"},)
+    type_arg_extract = ()
+    # on_null is known to be supported only by oracle
+    identity_attrs_ignore = ("on_null",)
 
     def __init__(
         self,
@@ -91,7 +94,7 @@ class DefaultImpl(with_metaclass(ImplMeta)):
         """
         return False
 
-    def prep_table_for_batch(self, table):
+    def prep_table_for_batch(self, batch_impl, table):
         """perform any operations needed on a table before a new
         one is created to replace it in batch mode.
 
@@ -137,7 +140,10 @@ class DefaultImpl(with_metaclass(ImplMeta)):
             conn = self.connection
             if execution_options:
                 conn = conn.execution_options(**execution_options)
-            return conn.execute(construct, *multiparams, **params)
+            if params:
+                multiparams += (params,)
+
+            return conn.execute(construct, multiparams)
 
     def execute(self, sql, execution_options=None):
         self._exec(sql, execution_options)
@@ -179,8 +185,20 @@ class DefaultImpl(with_metaclass(ImplMeta)):
                 )
             )
         if server_default is not False:
+            kw = {}
+            if sqla_compat._server_default_is_computed(
+                server_default, existing_server_default
+            ):
+                cls_ = base.ComputedColumnDefault
+            elif sqla_compat._server_default_is_identity(
+                server_default, existing_server_default
+            ):
+                cls_ = base.IdentityColumnDefault
+                kw["impl"] = self
+            else:
+                cls_ = base.ColumnDefault
             self._exec(
-                base.ColumnDefault(
+                cls_(
                     table_name,
                     column_name,
                     server_default,
@@ -189,6 +207,7 @@ class DefaultImpl(with_metaclass(ImplMeta)):
                     existing_server_default=existing_server_default,
                     existing_nullable=existing_nullable,
                     existing_comment=existing_comment,
+                    **kw
                 )
             )
         if type_ is not None:
@@ -263,15 +282,14 @@ class DefaultImpl(with_metaclass(ImplMeta)):
             self._exec(schema.CreateIndex(index))
 
         with_comment = (
-            sqla_compat._dialect_supports_comments(self.dialect)
-            and not self.dialect.inline_comments
+            self.dialect.supports_comments and not self.dialect.inline_comments
         )
-        comment = sqla_compat._comment_attribute(table)
+        comment = table.comment
         if comment and with_comment:
             self.create_table_comment(table)
 
         for column in table.columns:
-            comment = sqla_compat._comment_attribute(column)
+            comment = column.comment
             if comment and with_comment:
                 self.create_column_comment(column)
 
@@ -301,7 +319,7 @@ class DefaultImpl(with_metaclass(ImplMeta)):
         if self.as_sql:
             for row in rows:
                 self._exec(
-                    table.insert(inline=True).values(
+                    sqla_compat._insert_inline(table).values(
                         **dict(
                             (
                                 k,
@@ -323,10 +341,14 @@ class DefaultImpl(with_metaclass(ImplMeta)):
                 table._autoincrement_column = None
             if rows:
                 if multiinsert:
-                    self._exec(table.insert(inline=True), multiparams=rows)
+                    self._exec(
+                        sqla_compat._insert_inline(table), multiparams=rows
+                    )
                 else:
                     for row in rows:
-                        self._exec(table.insert(inline=True).values(**row))
+                        self._exec(
+                            sqla_compat._insert_inline(table).values(**row)
+                        )
 
     def _tokenize_column_type(self, column):
         definition = self.dialect.type_compiler.process(column.type).lower()
@@ -339,33 +361,50 @@ class DefaultImpl(with_metaclass(ImplMeta)):
         # TIMESTAMP WITH TIMEZONE
         # INTEGER UNSIGNED
         # INTEGER (10) UNSIGNED
+        # INTEGER(10) UNSIGNED
+        # varchar character set utf8
         #
-        # "ext" are the words after the parenthesis, if any, but if there
-        # are no parenthesis, then these are part of "col".  so they are
-        # moved together for normalization purposes
-        matches = re.search(
-            r"^(?P<col>[^()]*)(?:\((?P<params>.*?)\))?(?P<ext>[^()]*)?$",
-            definition,
-        ).groupdict(default="")
-        col_type = matches["col"]
-        if matches["ext"]:
-            col_type = col_type.strip() + " " + matches["ext"].strip()
 
-        params = Params(col_type, [], {})
-        for term in re.findall("[^(),]+", matches["params"] or ""):
-            if "=" in term:
-                key, val = term.split("=")
-                params.kwargs[key.strip()] = val.strip()
+        tokens = re.findall(r"[\w\-_]+|\(.+?\)", definition)
+
+        term_tokens = []
+        paren_term = None
+
+        for token in tokens:
+            if re.match(r"^\(.*\)$", token):
+                paren_term = token
             else:
-                params.args.append(term.strip())
+                term_tokens.append(token)
+
+        params = Params(term_tokens[0], term_tokens[1:], [], {})
+
+        if paren_term:
+            for term in re.findall("[^(),]+", paren_term):
+                if "=" in term:
+                    key, val = term.split("=")
+                    params.kwargs[key.strip()] = val.strip()
+                else:
+                    params.args.append(term.strip())
+
         return params
 
-    def _column_types_match(self, inspector_type, metadata_type):
-        if inspector_type == metadata_type:
+    def _column_types_match(self, inspector_params, metadata_params):
+        if inspector_params.token0 == metadata_params.token0:
             return True
+
         synonyms = [{t.lower() for t in batch} for batch in self.type_synonyms]
+        inspector_all_terms = " ".join(
+            [inspector_params.token0] + inspector_params.tokens
+        )
+        metadata_all_terms = " ".join(
+            [metadata_params.token0] + metadata_params.tokens
+        )
+
         for batch in synonyms:
-            if {inspector_type, metadata_type}.issubset(batch):
+            if {inspector_all_terms, metadata_all_terms}.issubset(batch) or {
+                inspector_params.token0,
+                metadata_params.token0,
+            }.issubset(batch):
                 return True
         return False
 
@@ -375,22 +414,27 @@ class DefaultImpl(with_metaclass(ImplMeta)):
         we want to make sure they are the same. However, if only one
         specifies it, dont flag it for being less specific
         """
-        # py27- .keys is a set in py36
-        for kw in set(inspected_params.kwargs.keys()) & set(
-            meta_params.kwargs.keys()
-        ):
-            if inspected_params.kwargs[kw] != meta_params.kwargs[kw]:
-                return False
 
-        # compare the positional arguments to the extent that they are
-        # present in the SQL form of the metadata type compared to
-        # the inspected type.   Example:  Oracle NUMBER(17) and NUMBER(17, 0)
-        # are equivalent.  As it's not clear if some database types might
-        # ignore additional parameters vs. they aren't actually there and
-        # need to be added, for now we are still favoring avoiding false
-        # positives
-        for meta, inspect in zip(meta_params.args, inspected_params.args):
-            if meta != inspect:
+        if (
+            len(meta_params.tokens) == len(inspected_params.tokens)
+            and meta_params.tokens != inspected_params.tokens
+        ):
+            return False
+
+        if (
+            len(meta_params.args) == len(inspected_params.args)
+            and meta_params.args != inspected_params.args
+        ):
+            return False
+
+        insp = " ".join(inspected_params.tokens).lower()
+        meta = " ".join(meta_params.tokens).lower()
+
+        for reg in self.type_arg_extract:
+            mi = re.search(reg, insp)
+            mm = re.search(reg, meta)
+
+            if mi and mm and mi.group(1) != mm.group(1):
                 return False
 
         return True
@@ -402,9 +446,8 @@ class DefaultImpl(with_metaclass(ImplMeta)):
         """
         inspector_params = self._tokenize_column_type(inspector_column)
         metadata_params = self._tokenize_column_type(metadata_column)
-        if not self._column_types_match(
-            inspector_params.type, metadata_params.type
-        ):
+
+        if not self._column_types_match(inspector_params, metadata_params):
             return True
         if not self._column_args_match(inspector_params, metadata_params):
             return True
@@ -427,6 +470,12 @@ class DefaultImpl(with_metaclass(ImplMeta)):
         metadata_indexes,
     ):
         pass
+
+    def cast_for_batch_migrate(self, existing, existing_transfer, new_type):
+        if existing.type._type_affinity is not new_type._type_affinity:
+            existing_transfer["expr"] = cast(
+                existing_transfer["expr"], new_type
+            )
 
     def render_ddl_sql_expr(self, expr, is_server_default=False, **kw):
         """Render a SQL expression that is typically a server default,
@@ -486,3 +535,52 @@ class DefaultImpl(with_metaclass(ImplMeta)):
 
     def render_type(self, type_obj, autogen_context):
         return False
+
+    def _compare_identity_default(self, metadata_identity, inspector_identity):
+
+        # ignored contains the attributes that were not considered
+        # because assumed to their default values in the db.
+        diff, ignored = _compare_identity_options(
+            sqla_compat._identity_attrs,
+            metadata_identity,
+            inspector_identity,
+            sqla_compat.Identity(),
+        )
+
+        meta_always = getattr(metadata_identity, "always", None)
+        inspector_always = getattr(inspector_identity, "always", None)
+        # None and False are the same in this comparison
+        if bool(meta_always) != bool(inspector_always):
+            diff.add("always")
+
+        diff.difference_update(self.identity_attrs_ignore)
+
+        # returns 3 values:
+        return (
+            # different identity attributes
+            diff,
+            # ignored identity attributes
+            ignored,
+            # if the two identity should be considered different
+            bool(diff) or bool(metadata_identity) != bool(inspector_identity),
+        )
+
+
+def _compare_identity_options(
+    attributes, metadata_io, inspector_io, default_io
+):
+    # this can be used for identity or sequence compare.
+    # default_io is an instance of IdentityOption with all attributes to the
+    # default value.
+    diff = set()
+    ignored_attr = set()
+    for attr in attributes:
+        meta_value = getattr(metadata_io, attr, None)
+        default_value = getattr(default_io, attr, None)
+        conn_value = getattr(inspector_io, attr, None)
+        if conn_value != meta_value:
+            if meta_value == default_value:
+                ignored_attr.add(attr)
+            else:
+                diff.add(attr)
+    return diff, ignored_attr

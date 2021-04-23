@@ -26,10 +26,6 @@ class SuiteRequirements(Requirements):
         def doesnt_have_check_uq_constraints(config):
             from sqlalchemy import inspect
 
-            # temporary
-            if config.db.name == "oracle":
-                return True
-
             insp = inspect(config.db)
             try:
                 insp.get_unique_constraints("x")
@@ -42,6 +38,15 @@ class SuiteRequirements(Requirements):
             return False
 
         return exclusions.skip_if(doesnt_have_check_uq_constraints)
+
+    @property
+    def sequences(self):
+        """Target database must support SEQUENCEs."""
+
+        return exclusions.only_if(
+            [lambda config: config.db.dialect.supports_sequences],
+            "no sequence support",
+        )
 
     @property
     def foreign_key_match(self):
@@ -63,21 +68,6 @@ class SuiteRequirements(Requirements):
         return exclusions.closed()
 
     @property
-    def sqlalchemy_issue_3740(self):
-        """Fixes percent sign escaping for paramstyles that don't require it"""
-        return exclusions.skip_if(
-            lambda config: not util.sqla_120,
-            "SQLAlchemy 1.2 or greater required",
-        )
-
-    @property
-    def sqlalchemy_12(self):
-        return exclusions.skip_if(
-            lambda config: not util.sqla_1216,
-            "SQLAlchemy 1.2.16 or greater required",
-        )
-
-    @property
     def sqlalchemy_13(self):
         return exclusions.skip_if(
             lambda config: not util.sqla_13,
@@ -85,33 +75,10 @@ class SuiteRequirements(Requirements):
         )
 
     @property
-    def sqlalchemy_1115(self):
+    def sqlalchemy_14(self):
         return exclusions.skip_if(
-            lambda config: not util.sqla_1115,
-            "SQLAlchemy 1.1.15 or greater required",
-        )
-
-    @property
-    def sqlalchemy_110(self):
-        return exclusions.skip_if(
-            lambda config: not util.sqla_110,
-            "SQLAlchemy 1.1.0 or greater required",
-        )
-
-    @property
-    def sqlalchemy_issue_4436(self):
-        def check(config):
-            vers = sqla_compat._vers
-
-            if vers == (1, 3, 0, "b1"):
-                return True
-            elif vers >= (1, 2, 16):
-                return False
-            else:
-                return True
-
-        return exclusions.skip_if(
-            check, "SQLAlchemy 1.2.16, 1.3.0b2 or greater required"
+            lambda config: not util.sqla_14,
+            "SQLAlchemy 1.4 or greater required",
         )
 
     @property
@@ -128,14 +95,8 @@ class SuiteRequirements(Requirements):
     @property
     def comments(self):
         return exclusions.only_if(
-            lambda config: sqla_compat._dialect_supports_comments(
-                config.db.dialect
-            )
+            lambda config: config.db.dialect.supports_comments
         )
-
-    @property
-    def comments_api(self):
-        return exclusions.only_if(lambda config: util.sqla_120)
 
     @property
     def alter_column(self):
@@ -150,3 +111,21 @@ class SuiteRequirements(Requirements):
         return exclusions.only_if(
             exclusions.BooleanPredicate(sqla_compat.has_computed)
         )
+
+    @property
+    def identity_columns(self):
+        return exclusions.closed()
+
+    @property
+    def identity_columns_alter(self):
+        return exclusions.closed()
+
+    @property
+    def identity_columns_api(self):
+        return exclusions.only_if(
+            exclusions.BooleanPredicate(sqla_compat.has_identity)
+        )
+
+    @property
+    def supports_identity_on_null(self):
+        return exclusions.closed()

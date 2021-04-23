@@ -1,5 +1,10 @@
 #!coding: utf-8
+import os
+import sys
+
 from alembic import command
+from alembic import testing
+from alembic import util
 from alembic.environment import EnvironmentContext
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
@@ -10,9 +15,11 @@ from alembic.testing import is_
 from alembic.testing import is_false
 from alembic.testing import is_true
 from alembic.testing import mock
-from alembic.testing.assertions import expect_warnings
+from alembic.testing.assertions import expect_raises_message
+from alembic.testing.env import _get_staging_directory
 from alembic.testing.env import _no_sql_testing_config
 from alembic.testing.env import _sqlite_file_db
+from alembic.testing.env import _sqlite_testing_config
 from alembic.testing.env import clear_staging_env
 from alembic.testing.env import staging_env
 from alembic.testing.env import write_script
@@ -65,7 +72,6 @@ class EnvironmentTest(TestBase):
         ctx = MigrationContext(ctx.dialect, None, {})
         is_(ctx.config, None)
 
-    @config.requirements.sqlalchemy_issue_3740
     def test_sql_mode_parameters(self):
         env = self._fixture()
 
@@ -94,7 +100,11 @@ def upgrade():
             command.upgrade(self.cfg, "arev", sql=True)
         assert "do some SQL thing with a % percent sign %" in buf.getvalue()
 
-    def test_warning_on_passing_engine(self):
+    @config.requirements.legacy_engine
+    @testing.uses_deprecated(
+        r"The Engine.execute\(\) function/method is considered legacy"
+    )
+    def test_error_on_passing_engine(self):
         env = self._fixture()
 
         engine = _sqlite_file_db()
@@ -128,17 +138,54 @@ def downgrade():
             migration_fn(rev, context)
             return env.script._upgrade_revs(a_rev, rev)
 
-        with expect_warnings(
+        with expect_raises_message(
+            util.CommandError,
             r"'connection' argument to configure\(\) is "
-            r"expected to be a sqlalchemy.engine.Connection "
+            r"expected to be a sqlalchemy.engine.Connection ",
         ):
             env.configure(
                 connection=engine, fn=upgrade, transactional_ddl=False
             )
 
-        env.run_migrations()
 
-        eq_(migration_fn.mock_calls, [mock.call((), env._migration_context)])
+class CWDTest(TestBase):
+    def setUp(self):
+        self.env = staging_env()
+        self.cfg = _sqlite_testing_config()
+
+    def tearDown(self):
+        clear_staging_env()
+
+    @testing.combinations(
+        (
+            ".",
+            ["."],
+        ),
+        ("/tmp/foo:/tmp/bar", ["/tmp/foo", "/tmp/bar"]),
+        ("/tmp/foo /tmp/bar", ["/tmp/foo", "/tmp/bar"]),
+        ("/tmp/foo,/tmp/bar", ["/tmp/foo", "/tmp/bar"]),
+        (". /tmp/foo", [".", "/tmp/foo"]),
+    )
+    def test_sys_path_prepend(self, config_value, expected):
+        self.cfg.set_main_option("prepend_sys_path", config_value)
+
+        script = ScriptDirectory.from_config(self.cfg)
+        env = EnvironmentContext(self.cfg, script)
+
+        target = os.path.abspath(_get_staging_directory())
+
+        def assert_(heads, context):
+            eq_(
+                [os.path.abspath(p) for p in sys.path[0 : len(expected)]],
+                [os.path.abspath(p) for p in expected],
+            )
+            return []
+
+        p = [p for p in sys.path if os.path.abspath(p) != target]
+        with mock.patch.object(sys, "path", p):
+            env.configure(url="sqlite://", fn=assert_)
+            with env:
+                script.run_env()
 
 
 class MigrationTransactionTest(TestBase):
@@ -235,7 +282,7 @@ class MigrationTransactionTest(TestBase):
         with context.begin_transaction():
             is_false(self.conn.in_transaction())
             with context.begin_transaction(_per_migration=True):
-                is_false(self.conn.in_transaction())
+                is_true(self.conn.in_transaction())
 
             is_false(self.conn.in_transaction())
         is_false(self.conn.in_transaction())
@@ -261,7 +308,7 @@ class MigrationTransactionTest(TestBase):
         with context.begin_transaction():
             is_false(self.conn.in_transaction())
             with context.begin_transaction(_per_migration=True):
-                is_false(self.conn.in_transaction())
+                is_true(self.conn.in_transaction())
 
             is_false(self.conn.in_transaction())
         is_false(self.conn.in_transaction())
@@ -331,18 +378,12 @@ class MigrationTransactionTest(TestBase):
         with context.begin_transaction():
             is_false(self.conn.in_transaction())
             with context.begin_transaction(_per_migration=True):
-                if context.impl.transactional_ddl:
-                    is_true(self.conn.in_transaction())
-                else:
-                    is_false(self.conn.in_transaction())
+                is_true(self.conn.in_transaction())
 
                 with context.autocommit_block():
                     is_false(self.conn.in_transaction())
 
-                if context.impl.transactional_ddl:
-                    is_true(self.conn.in_transaction())
-                else:
-                    is_false(self.conn.in_transaction())
+                is_true(self.conn.in_transaction())
 
             is_false(self.conn.in_transaction())
         is_false(self.conn.in_transaction())

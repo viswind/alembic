@@ -152,8 +152,6 @@ def revision(
      the other parameters, this option is only available via programmatic
      use of :func:`.command.revision`
 
-     .. versionadded:: 0.9.0
-
     """
 
     script_directory = ScriptDirectory.from_config(config)
@@ -227,8 +225,6 @@ def revision(
 
 def merge(config, revisions, message=None, branch_label=None, rev_id=None):
     """Merge two revisions together.  Creates a new migration file.
-
-    .. versionadded:: 0.7.0
 
     :param config: a :class:`.Config` instance
 
@@ -375,8 +371,6 @@ def history(config, rev_range=None, verbose=False, indicate_current=False):
 
     :param indicate_current: indicate current revision.
 
-     ..versionadded:: 0.9.9
-
     """
 
     script = ScriptDirectory.from_config(config)
@@ -484,21 +478,16 @@ def branches(config, verbose=False):
             )
 
 
-def current(config, verbose=False, head_only=False):
+def current(config, verbose=False):
     """Display the current revision for a database.
 
     :param config: a :class:`.Config` instance.
 
     :param verbose: output in verbose mode.
 
-    :param head_only: deprecated; use ``verbose`` for additional output.
-
     """
 
     script = ScriptDirectory.from_config(config)
-
-    if head_only:
-        util.warn("--head-only is deprecated", stacklevel=3)
 
     def display_version(rev, context):
         if verbose:
@@ -511,7 +500,9 @@ def current(config, verbose=False, head_only=False):
 
         return []
 
-    with EnvironmentContext(config, script, fn=display_version):
+    with EnvironmentContext(
+        config, script, fn=display_version, dont_mutate=True
+    ):
         script.run_env()
 
 

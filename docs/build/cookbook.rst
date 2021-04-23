@@ -258,8 +258,6 @@ Then in ``env.py``::
     connection doesn't actually close the outer connection, which stays
     active for continued use.
 
-.. versionadded:: 0.7.5 Added :attr:`.Config.attributes`.
-
 .. _replaceable_objects:
 
 Replaceable Objects
@@ -269,6 +267,14 @@ This recipe proposes a hypothetical way of dealing with
 what we might call a *replaceable* schema object.  A replaceable object
 is a schema object that needs to be created and dropped all at once.
 Examples of such objects include views, stored procedures, and triggers.
+
+.. seealso::
+
+    The Replaceable Object concept has been integrated by the
+    `Alembic Utils <https://github.com/olirice/alembic_utils>`_ project,
+    which provides autogenerate and migration
+    support for PostgreSQL functions and views.   See
+    Alembic Utils at https://github.com/olirice/alembic_utils .
 
 Replaceable objects present a problem in that in order to make incremental
 changes to them, we have to refer to the whole definition at once.
@@ -774,6 +780,117 @@ recreated again within the downgrade for this migration::
     INFO  [sqlalchemy.engine.base.Engine] {}
     INFO  [sqlalchemy.engine.base.Engine] COMMIT
 
+.. _cookbook_postgresql_multi_tenancy:
+
+Rudimental Schema-Level Multi Tenancy for PostgreSQL Databases
+==============================================================
+
+**Multi tenancy** refers to an application that accommodates for many
+clients simultaneously.   Within the scope of a database migrations tool,
+multi-tenancy typically refers to the practice of maintaining multiple,
+identical databases where each database is assigned to one client.
+
+Alembic does not currently have explicit multi-tenant support; typically,
+the approach must involve running Alembic multiple times against different
+database URLs.
+
+One common approach to multi-tenancy, particularly on the PostgreSQL database,
+is to install tenants within **individual PostgreSQL schemas**.  When using
+PostgreSQL's schemas, a special variable ``search_path`` is offered that is
+intended to assist with targeting of different schemas.
+
+.. note::  SQLAlchemy includes a system of directing a common set of
+   ``Table`` metadata to many schemas called `schema_translate_map <https://docs.sqlalchemy.org/core/connections.html#translation-of-schema-names>`_.   Alembic at the time
+   of this writing lacks adequate support for this feature.  The recipe below
+   should be considered **interim** until Alembic has more first-class support
+   for schema-level multi-tenancy.
+
+The recipe below can be altered for flexibility.  The primary purpose of this
+recipe is to illustrate how to point the Alembic process towards one PostgreSQL
+schema or another.
+
+1. The model metadata used as the target for autogenerate must not include any
+   schema name for tables; the schema must be non-present or set to ``None``.
+   Otherwise, Alembic autogenerate will still attempt
+   to compare and render tables in terms of this schema::
+
+
+        class A(Base):
+            __tablename__ = 'a'
+
+            id = Column(Integer, primary_key=True)
+            data = Column(UnicodeText())
+            foo = Column(Integer)
+
+            __table_args__ = {
+                "schema": None
+            }
+
+   ..
+
+2. The :paramref:`.EnvironmentContext.configure.include_schemas` flag must
+   also be False or not included.
+
+3. The "tenant" will be a schema name passed to Alembic using the "-x" flag.
+   In ``env.py`` an approach like the following allows ``-xtenant=some_schema``
+   to be supported by making use of :meth:`.EnvironmentContext.get_x_argument`::
+
+        def run_migrations_online():
+            connectable = engine_from_config(
+                config.get_section(config.config_ini_section),
+                prefix="sqlalchemy.",
+                poolclass=pool.NullPool,
+            )
+
+            current_tenant = context.get_x_argument(as_dictionary=True).get("tenant")
+            with connectable.connect() as connection:
+
+                # set search path on the connection, which ensures that
+                # PostgreSQL will emit all CREATE / ALTER / DROP statements
+                # in terms of this schema by default
+                connection.execute("set search_path to %s" % current_tenant)
+
+                # make use of non-supported SQLAlchemy attribute to ensure
+                # the dialect reflects tables in terms of the current tenant name
+                connection.dialect.default_schema_name = current_tenant
+
+                context.configure(
+                    connection=connection,
+                    target_metadata=target_metadata,
+                )
+
+                with context.begin_transaction():
+                    context.run_migrations()
+
+   The current tenant is set using the PostgreSQL ``search_path`` variable on
+   the connection.  Note above we must employ a **non-supported SQLAlchemy
+   workaround** at the moment which is to hardcode the SQLAlchemy dialect's
+   default schema name to our target schema.
+
+   It is also important to note that the above changes **remain on the connection
+   permanently unless reversed explicitly**.  If the alembic application simply
+   exits above, there is no issue.  However if the application attempts to
+   continue using the above connection for other purposes, it may be necessary
+   to reset these variables back to the default, which for PostgreSQL is usually
+   the name "public" however may be different based on configuration.
+
+
+4. Alembic operations will now proceed in terms of whichever schema we pass
+   on the command line.   All logged SQL will show no schema, except for
+   reflection operations which will make use of the ``default_schema_name``
+   attribute::
+
+       []$ alembic -x tenant=some_schema revision -m "rev1" --autogenerate
+
+   ..
+
+5. Since all schemas are to be maintained in sync, autogenerate should be run
+   against only **one** schema, generating new Alembic migration files.
+   Autogenerate migratin operations are then run against **all** schemas.
+
+
+.. _cookbook_no_empty_migrations:
+
 Don't Generate Empty Migrations with Autogenerate
 =================================================
 
@@ -808,6 +925,8 @@ any operations::
 
             with context.begin_transaction():
                 context.run_migrations()
+
+.. _cookbook_dont_emit_drop_index:
 
 Don't emit DROP INDEX when the table is to be dropped as well
 =============================================================
@@ -933,6 +1052,98 @@ the local :class:`.MetaData` collection::
         # ...
         include_object = include_object
     )
+
+.. _cookbook_custom_sorting_create_table:
+
+Apply Custom Sorting to Table Columns within CREATE TABLE
+==========================================================
+
+This example illustrates use of the :class:`.Rewriter` object introduced
+at :ref:`autogen_rewriter`.   While the rewriter grants access to the
+individual :class:`.ops.MigrateOperation` objects, there are sometimes some
+special techniques required to get around some structural limitations that
+are present.
+
+One is when trying to reorganize the order of columns in a
+table within a :class:`.ops.CreateTableOp` directive.  This directive, when
+generated by autogenerate, actually holds onto the original :class:`.Table`
+object as the source of its information, so attempting to reorder the
+:attr:`.ops.CreateTableOp.columns` collection will usually have no effect.
+Instead, a new :class:`.ops.CreateTableOp` object may be constructed with the
+new ordering.   However, a second issue is that the :class:`.Column` objects
+inside will already be associated with the :class:`.Table` that is from the
+model being autogenerated, meaning they can't be reassigned directly to a new
+:class:`.Table`.  To get around this, we can copy all the columns and constraints
+using methods like :meth:`.Column.copy`.
+
+Below we use :class:`.Rewriter` to create a new :class:`.ops.CreateTableOp`
+directive and to copy the :class:`.Column` objects from one into another,
+copying each column or constraint object and applying a new sorting scheme::
+
+    # in env.py
+
+    from alembic.operations import ops
+    from alembic.autogenerate import rewriter
+
+    writer = rewriter.Rewriter()
+
+    @writer.rewrites(ops.CreateTableOp)
+    def order_columns(context, revision, op):
+
+        special_names = {"id": -100, "created_at": 1001, "updated_at": 1002}
+
+        cols_by_key = [
+            (
+                special_names.get(col.key, index)
+                if isinstance(col, Column)
+                else 2000,
+                col.copy(),
+            )
+            for index, col in enumerate(op.columns)
+        ]
+
+        columns = [
+            col for idx, col in sorted(cols_by_key, key=lambda entry: entry[0])
+        ]
+        return ops.CreateTableOp(
+            op.table_name, columns, schema=op.schema, **op.kw)
+
+
+    # ...
+
+    context.configure(
+        # ...
+        process_revision_directives=writer
+    )
+
+
+Above, when we apply the ``writer`` to a table such as::
+
+    Table(
+        "my_table",
+        m,
+        Column("data", String(50)),
+        Column("created_at", DateTime),
+        Column("id", Integer, primary_key=True),
+        Column("updated_at", DateTime),
+        UniqueConstraint("data", name="uq_data")
+    )
+
+
+This will render in the autogenerated file as::
+
+    def upgrade():
+        # ### commands auto generated by Alembic - please adjust! ###
+        op.create_table(
+            "my_table",
+            sa.Column("id", sa.Integer(), nullable=False),
+            sa.Column("data", sa.String(length=50), nullable=True),
+            sa.Column("created_at", sa.DateTime(), nullable=True),
+            sa.Column("updated_at", sa.DateTime(), nullable=True),
+            sa.PrimaryKeyConstraint("id"),
+            sa.UniqueConstraint("data", name="uq_data"),
+        )
+        # ### end Alembic commands ###
 
 Don't emit CREATE TABLE statements for Views
 ============================================
@@ -1080,6 +1291,127 @@ Output::
     op.create_index('property_name_users_id', 'user_properties', ['property_name', 'users_id'], unique=True)
     # ### end Alembic commands ###
 
+Run Alembic Operation Objects Directly (as in from autogenerate)
+================================================================
+
+The :class:`.Operations` object has a method known as
+:meth:`.Operations.invoke` that will generically invoke a particular operation
+object.  We can therefore use the :func:`.autogenerate.produce_migrations`
+function to run an autogenerate comparison, get back a
+:class:`.ops.MigrationScript` structure representing the changes, and with a
+little bit of insider information we can invoke them directly.
+
+The traversal through the :class:`.ops.MigrationScript` structure is as
+follows::
+
+    use_batch = engine.name == "sqlite"
+
+    stack = [migrations.upgrade_ops]
+    while stack:
+        elem = stack.pop(0)
+
+        if use_batch and isinstance(elem, ModifyTableOps):
+            with operations.batch_alter_table(
+                elem.table_name, schema=elem.schema
+            ) as batch_ops:
+                for table_elem in elem.ops:
+                    # work around Alembic issue #753 (fixed in 1.5.0)
+                    if hasattr(table_elem, "column"):
+                        table_elem.column = table_elem.column.copy()
+                    batch_ops.invoke(table_elem)
+
+        elif hasattr(elem, "ops"):
+            stack.extend(elem.ops)
+        else:
+            # work around Alembic issue #753 (fixed in 1.5.0)
+            if hasattr(elem, "column"):
+                elem.column = elem.column.copy()
+            operations.invoke(elem)
+
+Above, we detect elements that have a collection of operations by looking
+for the ``.ops`` attribute.   A check for :class:`.ModifyTableOps` allows
+us to use a batch context if we are supporting that.   Finally there's a
+workaround for an Alembic issue that exists for SQLAlchemy 1.3.20 and greater
+combined with Alembic older than 1.5.
+
+A full example follows.  The overall setup here is copied from the example
+at :func:`.autogenerate.compare_metadata`::
+
+    from sqlalchemy import Column
+    from sqlalchemy import create_engine
+    from sqlalchemy import Integer
+    from sqlalchemy import MetaData
+    from sqlalchemy import String
+    from sqlalchemy import Table
+
+    from alembic.autogenerate import produce_migrations
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from alembic.operations.ops import ModifyTableOps
+
+
+    engine = create_engine("sqlite://", echo=True)
+
+    with engine.connect() as conn:
+        conn.execute(
+            """
+            create table foo (
+                id integer not null primary key,
+                old_data varchar(50),
+                x integer
+            )"""
+        )
+
+        conn.execute(
+            """
+            create table bar (
+                data varchar(50)
+            )"""
+        )
+
+    metadata = MetaData()
+    Table(
+        "foo",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("data", Integer),
+        Column("x", Integer, nullable=False),
+    )
+    Table("bat", metadata, Column("info", String(100)))
+
+    mc = MigrationContext.configure(engine.connect())
+
+    migrations = produce_migrations(mc, metadata)
+
+    operations = Operations(mc)
+
+    use_batch = engine.name == "sqlite"
+
+    stack = [migrations.upgrade_ops]
+    while stack:
+        elem = stack.pop(0)
+
+        if use_batch and isinstance(elem, ModifyTableOps):
+            with operations.batch_alter_table(
+                elem.table_name, schema=elem.schema
+            ) as batch_ops:
+                for table_elem in elem.ops:
+                    # work around Alembic issue #753 (fixed in 1.5.0)
+                    if hasattr(table_elem, "column"):
+                        table_elem.column = table_elem.column.copy()
+                    batch_ops.invoke(table_elem)
+
+        elif hasattr(elem, "ops"):
+            stack.extend(elem.ops)
+        else:
+            # work around Alembic issue #753 (fixed in 1.5.0)
+            if hasattr(elem, "column"):
+                elem.column = elem.column.copy()
+            operations.invoke(elem)
+
+
+
+
 Test current database revision is at head(s)
 ============================================
 
@@ -1165,3 +1497,61 @@ example of applying this to the "message" field is as follows:
 
     def downgrade():
         ${downgrades if downgrades else "pass"}
+
+Using Asyncio with Alembic
+==========================
+
+SQLAlchemy version 1.4 introduced experimental support for asyncio, allowing
+use of most of its interface from async applications. Alembic currently does
+not provide an async api directly, but it can use an use SQLAlchemy Async
+engine to run the migrations and autogenerate.
+
+New configurations can use the template "async" to bootstrap an environment which
+can be used with async DBAPI like asyncpg, running the command::
+
+    alembic init -t async <script_directory_here>
+
+Existing configurations can be updated to use an async DBAPI by updating the ``env.py``
+file that's used by Alembic to start its operations. In particular only
+``run_migrations_online`` will need to be updated to be something like the example below::
+
+    import asyncio
+    
+    # ... no change required to the rest of the code
+
+
+    def do_run_migrations(connection):
+        context.configure(connection=connection, target_metadata=target_metadata)
+
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+    async def run_migrations_online():
+        """Run migrations in 'online' mode.
+
+        In this scenario we need to create an Engine
+        and associate a connection with the context.
+
+        """
+        connectable = AsyncEngine(
+            engine_from_config(
+                config.get_section(config.config_ini_section),
+                prefix="sqlalchemy.",
+                poolclass=pool.NullPool,
+                future=True,
+            )
+        )
+
+        async with connectable.connect() as connection:
+            await connection.run_sync(do_run_migrations)
+
+
+    if context.is_offline_mode():
+        run_migrations_offline()
+    else:
+        asyncio.run(run_migrations_online())
+
+An asnyc application can also interact with the Alembic api directly by using
+the SQLAlchemy ``run_sync`` method to adapt the non-async api of Alembic to
+an async consumer.

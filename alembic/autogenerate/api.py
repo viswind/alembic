@@ -31,22 +31,23 @@ def compare_metadata(context, metadata):
         from sqlalchemy.schema import SchemaItem
         from sqlalchemy.types import TypeEngine
         from sqlalchemy import (create_engine, MetaData, Column,
-                Integer, String, Table)
+                Integer, String, Table, text)
         import pprint
 
         engine = create_engine("sqlite://")
 
-        engine.execute('''
-            create table foo (
-                id integer not null primary key,
-                old_data varchar,
-                x integer
-            )''')
+        with engine.begin() as conn:
+            conn.execute(text('''
+                create table foo (
+                    id integer not null primary key,
+                    old_data varchar,
+                    x integer
+                )'''))
 
-        engine.execute('''
-            create table bar (
-                data varchar
-            )''')
+            conn.execute(text('''
+                create table bar (
+                    data varchar
+                )'''))
 
         metadata = MetaData()
         Table('foo', metadata,
@@ -113,8 +114,6 @@ def produce_migrations(context, metadata):
     but then runs the resulting list of diffs to produce the full
     :class:`.MigrationScript` object.   For an example of what this looks like,
     see the example in :ref:`customizing_revision`.
-
-    .. versionadded:: 0.8.0
 
     .. seealso::
 
@@ -220,7 +219,7 @@ class AutogenContext(object):
     connected to the database backend being compared.
 
     This is obtained from the :attr:`.MigrationContext.bind` and is
-    utimately set up in the ``env.py`` script.
+    ultimately set up in the ``env.py`` script.
 
     """
 
@@ -239,8 +238,6 @@ class AutogenContext(object):
     of a script template.  The set is normally empty and can be modified
     within hooks such as the
     :paramref:`.EnvironmentContext.configure.render_item` hook.
-
-    .. versionadded:: 0.8.3
 
     .. seealso::
 
@@ -285,25 +282,18 @@ class AutogenContext(object):
                 % (migration_context.script.env_py_location)
             )
 
-        include_symbol = opts.get("include_symbol", None)
         include_object = opts.get("include_object", None)
+        include_name = opts.get("include_name", None)
 
         object_filters = []
-        if include_symbol:
-
-            def include_symbol_filter(
-                object_, name, type_, reflected, compare_to
-            ):
-                if type_ == "table":
-                    return include_symbol(name, object_.schema)
-                else:
-                    return True
-
-            object_filters.append(include_symbol_filter)
+        name_filters = []
         if include_object:
             object_filters.append(include_object)
+        if include_name:
+            name_filters.append(include_name)
 
         self._object_filters = object_filters
+        self._name_filters = name_filters
 
         self.migration_context = migration_context
         if self.migration_context is not None:
@@ -324,7 +314,41 @@ class AutogenContext(object):
         yield
         self._has_batch = False
 
-    def run_filters(self, object_, name, type_, reflected, compare_to):
+    def run_name_filters(self, name, type_, parent_names):
+        """Run the context's name filters and return True if the targets
+        should be part of the autogenerate operation.
+
+        This method should be run for every kind of name encountered within the
+        reflection side of an autogenerate operation, giving the environment
+        the chance to filter what names should be reflected as database
+        objects.  The filters here are produced directly via the
+        :paramref:`.EnvironmentContext.configure.include_name` parameter.
+
+        """
+
+        if "schema_name" in parent_names:
+            if type_ == "table":
+                table_name = name
+            else:
+                table_name = parent_names.get("table_name", None)
+            if table_name:
+                schema_name = parent_names["schema_name"]
+                if schema_name:
+                    parent_names["schema_qualified_table_name"] = "%s.%s" % (
+                        schema_name,
+                        table_name,
+                    )
+                else:
+                    parent_names["schema_qualified_table_name"] = table_name
+
+        for fn in self._name_filters:
+
+            if not fn(name, type_, parent_names):
+                return False
+        else:
+            return True
+
+    def run_object_filters(self, object_, name, type_, reflected, compare_to):
         """Run the context's object filters and return True if the targets
         should be part of the autogenerate operation.
 
@@ -332,9 +356,7 @@ class AutogenContext(object):
         an autogenerate operation, giving the environment the chance
         to filter what objects should be included in the comparison.
         The filters here are produced directly via the
-        :paramref:`.EnvironmentContext.configure.include_object`
-        and :paramref:`.EnvironmentContext.configure.include_symbol`
-        functions, if present.
+        :paramref:`.EnvironmentContext.configure.include_object` parameter.
 
         """
         for fn in self._object_filters:
@@ -342,6 +364,8 @@ class AutogenContext(object):
                 return False
         else:
             return True
+
+    run_filters = run_object_filters
 
     @util.memoized_property
     def sorted_tables(self):
@@ -351,8 +375,6 @@ class AutogenContext(object):
         concatenates the :attr:`.MetaData.sorted_tables` collection
         for each individual :class:`.MetaData`  in the order of the
         sequence.  It does **not** collate the sorted tables collections.
-
-        .. versionadded:: 0.9.0
 
         """
         result = []
@@ -370,8 +392,6 @@ class AutogenContext(object):
 
         Duplicate table keys are **not** supported; if two :class:`.MetaData`
         objects contain the same table key, an exception is raised.
-
-        .. versionadded:: 0.9.0
 
         """
         result = {}

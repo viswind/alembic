@@ -3,6 +3,7 @@ import inspect
 import os
 import sys
 
+from . import __version__
 from . import command
 from . import util
 from .util import compat
@@ -66,8 +67,6 @@ class Config(object):
     :param stdout: buffer where the "print" output of commands will be sent.
      Defaults to ``sys.stdout``.
 
-     .. versionadded:: 0.4
-
     :param config_args: A dictionary of keys and values that will be used
      for substitution in the alembic config file.  The dictionary as given
      is **copied** to a new one, stored locally as the attribute
@@ -76,12 +75,8 @@ class Config(object):
      dictionary before the dictionary is passed to ``SafeConfigParser()``
      to parse the .ini file.
 
-     .. versionadded:: 0.7.0
-
     :param attributes: optional dictionary of arbitrary Python keys/values,
      which will be populated into the :attr:`.Config.attributes` dictionary.
-
-     .. versionadded:: 0.7.5
 
      .. seealso::
 
@@ -99,9 +94,7 @@ class Config(object):
         config_args=util.immutabledict(),
         attributes=None,
     ):
-        """Construct a new :class:`.Config`
-
-        """
+        """Construct a new :class:`.Config`"""
         self.config_file_name = file_
         self.config_ini_section = ini_section
         self.output_buffer = output_buffer
@@ -116,8 +109,6 @@ class Config(object):
 
     Within an ``env.py`` script this can be accessed via the
     :attr:`.EnvironmentContext.config` attribute.
-
-    .. versionadded:: 0.6.0
 
     .. seealso::
 
@@ -146,8 +137,6 @@ class Config(object):
         Use this to pass objects into an env.py script, such as passing
         a :class:`sqlalchemy.engine.base.Connection` when calling
         commands from :mod:`alembic.command` programmatically.
-
-        .. versionadded:: 0.7.5
 
         .. seealso::
 
@@ -269,9 +258,7 @@ class Config(object):
         self.file_config.set(section, name, value)
 
     def get_section_option(self, section, name, default=None):
-        """Return an option from the given section of the .ini file.
-
-        """
+        """Return an option from the given section of the .ini file."""
         if not self.file_config.has_section(section):
             raise util.CommandError(
                 "No config file %r found, or file has no "
@@ -402,14 +389,6 @@ class CommandLine(object):
                         "of database to model.",
                     ),
                 ),
-                "head_only": (
-                    "--head-only",
-                    dict(
-                        action="store_true",
-                        help="Deprecated.  Use --verbose for "
-                        "additional output",
-                    ),
-                ),
                 "rev_range": (
                     "-r",
                     "--rev-range",
@@ -471,6 +450,9 @@ class CommandLine(object):
 
         parser = ArgumentParser(prog=prog)
 
+        parser.add_argument(
+            "--version", action="version", version="%%(prog)s %s" % __version__
+        )
         parser.add_argument(
             "-c",
             "--config",

@@ -966,6 +966,43 @@ class AutogenRenderTest(TestBase):
             ")",
         )
 
+    def test_render_table_w_prefixes(self):
+        m = MetaData()
+        t = Table(
+            "test",
+            m,
+            Column("id", Integer, primary_key=True),
+            prefixes=["TEST", "PREFIXES"],
+        )
+        op_obj = ops.CreateTableOp.from_table(t)
+        eq_ignore_whitespace(
+            autogenerate.render_op_text(self.autogen_context, op_obj),
+            "op.create_table('test',"
+            "sa.Column('id', sa.Integer(), nullable=False),"
+            "sa.PrimaryKeyConstraint('id'),"
+            "prefixes=['TEST', 'PREFIXES']"
+            ")",
+        )
+
+    def test_render_table_w_prefixes_schema(self):
+        m = MetaData(schema="foo")
+        t = Table(
+            "test",
+            m,
+            Column("id", Integer, primary_key=True),
+            prefixes=["TEST", "PREFIXES"],
+        )
+        op_obj = ops.CreateTableOp.from_table(t)
+        eq_ignore_whitespace(
+            autogenerate.render_op_text(self.autogen_context, op_obj),
+            "op.create_table('test',"
+            "sa.Column('id', sa.Integer(), nullable=False),"
+            "sa.PrimaryKeyConstraint('id'),"
+            "schema='foo',"
+            "prefixes=['TEST', 'PREFIXES']"
+            ")",
+        )
+
     def test_render_addtl_args(self):
         m = MetaData()
         t = Table(
@@ -1168,7 +1205,6 @@ class AutogenRenderTest(TestBase):
             "nullable=False)",
         )
 
-    @config.requirements.comments_api
     def test_render_col_with_comment(self):
         c = Column("some_key", Integer, comment="This is a comment")
         Table("some_table", MetaData(), c)
@@ -1180,7 +1216,6 @@ class AutogenRenderTest(TestBase):
             "comment='This is a comment')",
         )
 
-    @config.requirements.comments_api
     def test_render_col_comment_with_quote(self):
         c = Column("some_key", Integer, comment="This is a john's comment")
         Table("some_table", MetaData(), c)
@@ -1865,7 +1900,6 @@ class AutogenRenderTest(TestBase):
             op_obj,
         )
 
-    @config.requirements.comments_api
     def test_render_alter_column_modify_comment(self):
         op_obj = ops.AlterColumnOp(
             "sometable", "somecolumn", modify_comment="This is a comment"
@@ -1876,7 +1910,6 @@ class AutogenRenderTest(TestBase):
             "comment='This is a comment')",
         )
 
-    @config.requirements.comments_api
     def test_render_alter_column_existing_comment(self):
         op_obj = ops.AlterColumnOp(
             "sometable", "somecolumn", existing_comment="This is a comment"
@@ -1887,7 +1920,6 @@ class AutogenRenderTest(TestBase):
             "existing_comment='This is a comment')",
         )
 
-    @config.requirements.comments_api
     def test_render_col_drop_comment(self):
         op_obj = ops.AlterColumnOp(
             "sometable",
@@ -1902,7 +1934,6 @@ class AutogenRenderTest(TestBase):
             "existing_comment='This is a comment')",
         )
 
-    @config.requirements.comments_api
     def test_render_table_with_comment(self):
         m = MetaData()
         t = Table(
@@ -1924,7 +1955,6 @@ class AutogenRenderTest(TestBase):
             ")",
         )
 
-    @config.requirements.comments_api
     def test_render_add_column_with_comment(self):
         op_obj = ops.AddColumnOp(
             "foo", Column("x", Integer, comment="This is a Column")
@@ -1935,7 +1965,6 @@ class AutogenRenderTest(TestBase):
             "nullable=True, comment='This is a Column'))",
         )
 
-    @config.requirements.comments_api
     def test_render_create_table_comment_op(self):
         op_obj = ops.CreateTableCommentOp("table_name", "comment")
         eq_ignore_whitespace(
@@ -1948,7 +1977,6 @@ class AutogenRenderTest(TestBase):
             ")",
         )
 
-    @config.requirements.comments_api
     def test_render_create_table_comment_with_quote_op(self):
         op_obj = ops.CreateTableCommentOp(
             "table_name",
@@ -2093,6 +2121,92 @@ class AutogenRenderTest(TestBase):
             "op.alter_column('sometable', 'somecolumn', "
             "existing_server_default=sa.Computed(!U'42', persisted=%s))"
             % persisted,
+        )
+
+    @config.requirements.identity_columns_api
+    @testing.combinations(
+        ({}, "sa.Identity(always=False)"),
+        (dict(always=None), "sa.Identity(always=None)"),
+        (dict(always=True), "sa.Identity(always=True)"),
+        (
+            dict(
+                always=False,
+                on_null=True,
+                start=2,
+                increment=4,
+                minvalue=-3,
+                maxvalue=99,
+                nominvalue=True,
+                nomaxvalue=True,
+                cycle=True,
+                cache=42,
+                order=True,
+            ),
+            "sa.Identity(always=False, on_null=True, start=2, increment=4, "
+            "minvalue=-3, maxvalue=99, nominvalue=True, nomaxvalue=True, "
+            "cycle=True, cache=42, order=True)",
+        ),
+    )
+    def test_render_add_column_identity(self, kw, text):
+        col = Column("x", Integer, sa.Identity(**kw))
+        op_obj = ops.AddColumnOp("foo", col)
+        eq_ignore_whitespace(
+            autogenerate.render_op_text(self.autogen_context, op_obj),
+            "op.add_column('foo', sa.Column('x', sa.Integer(), "
+            "%s, nullable=%r))" % (text, col.nullable),
+        )
+
+    @config.requirements.identity_columns_api
+    @testing.combinations(
+        ({}, "sa.Identity(always=False)"),
+        (dict(always=None), "sa.Identity(always=None)"),
+        (dict(always=True), "sa.Identity(always=True)"),
+        (
+            dict(
+                always=False,
+                on_null=True,
+                start=2,
+                increment=4,
+                minvalue=-3,
+                maxvalue=99,
+                nominvalue=True,
+                nomaxvalue=True,
+                cycle=True,
+                cache=42,
+                order=True,
+            ),
+            "sa.Identity(always=False, on_null=True, start=2, increment=4, "
+            "minvalue=-3, maxvalue=99, nominvalue=True, nomaxvalue=True, "
+            "cycle=True, cache=42, order=True)",
+        ),
+    )
+    def test_render_alter_column_add_identity(self, kw, text):
+        op_obj = ops.AlterColumnOp(
+            "foo",
+            "x",
+            existing_type=Integer(),
+            existing_server_default=None,
+            modify_server_default=sa.Identity(**kw),
+        )
+        eq_ignore_whitespace(
+            autogenerate.render_op_text(self.autogen_context, op_obj),
+            "op.alter_column('foo', 'x', existing_type=sa.Integer(), "
+            "server_default=%s)" % text,
+        )
+
+    @config.requirements.identity_columns_api
+    def test_render_alter_column_drop_identity(self):
+        op_obj = ops.AlterColumnOp(
+            "foo",
+            "x",
+            existing_type=Integer(),
+            existing_server_default=sa.Identity(),
+            modify_server_default=None,
+        )
+        eq_ignore_whitespace(
+            autogenerate.render_op_text(self.autogen_context, op_obj),
+            "op.alter_column('foo', 'x', existing_type=sa.Integer(), "
+            "server_default=None)",
         )
 
 

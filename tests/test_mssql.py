@@ -1,12 +1,15 @@
 """Test op functions against MSSQL."""
 
 from sqlalchemy import Column
+from sqlalchemy import exc
 from sqlalchemy import Integer
+from sqlalchemy import String
 
 from alembic import command
 from alembic import op
 from alembic import util
 from alembic.testing import assert_raises_message
+from alembic.testing import combinations
 from alembic.testing import config
 from alembic.testing import eq_
 from alembic.testing.env import _no_sql_testing_config
@@ -77,10 +80,26 @@ class OpTest(TestBase):
         op.alter_column("t", "c", new_column_name="SomeFancyName")
         context.assert_("EXEC sp_rename 't.c', [SomeFancyName], 'COLUMN'")
 
-    def test_alter_column_new_type(self):
+    @combinations((True,), (False,), argnames="pass_existing_type")
+    @combinations((True,), (False,), argnames="change_nullability")
+    def test_alter_column_type_and_nullability(
+        self, pass_existing_type, change_nullability
+    ):
         context = op_fixture("mssql")
-        op.alter_column("t", "c", type_=Integer)
-        context.assert_("ALTER TABLE t ALTER COLUMN c INTEGER")
+
+        args = dict(type_=Integer)
+        if pass_existing_type:
+            args["existing_type"] = String(15)
+
+        if change_nullability:
+            args["nullable"] = False
+
+        op.alter_column("t", "c", **args)
+
+        if change_nullability:
+            context.assert_("ALTER TABLE t ALTER COLUMN c INTEGER NOT NULL")
+        else:
+            context.assert_("ALTER TABLE t ALTER COLUMN c INTEGER")
 
     def test_alter_column_dont_touch_constraints(self):
         context = op_fixture("mssql")
@@ -191,7 +210,7 @@ class OpTest(TestBase):
             "select @const_name = [name] from\n"
             "sys.foreign_keys fk join sys.foreign_key_columns fkcon "
             "fk.object_id=fkc.constraint_object_id\n"
-            "where fkc.parent_object_id = object_id('t1')`and "
+            "where fkc.parent_object_id = object_id('t1')\nand "
             "col_name(fkc.parent_object_id, fkc.parent_column_id) = 'c1'\n"
             "exec('alter table t1 drop constraint ' + @const_name)"
         )
@@ -208,7 +227,7 @@ class OpTest(TestBase):
             "select @const_name = [name] from\n"
             "sys.foreign_keys fk join sys.foreign_key_columns fkcon "
             "fk.object_id=fkc.constraint_object_id\n"
-            "where fkc.parent_object_id = object_id('xyz.t1')`and "
+            "where fkc.parent_object_id = object_id('xyz.t1')\nand "
             "col_name(fkc.parent_object_id, fkc.parent_column_id) = 'c1'\n"
             "exec('alter table xyz.t1 drop constraint ' + @const_name)"
         )
@@ -329,7 +348,7 @@ class OpTest(TestBase):
 
     def test_alter_column_rename_mssql_schema(self):
         context = op_fixture("mssql")
-        op.alter_column("t", "c", name="x", schema="y")
+        op.alter_column("t", "c", new_column_name="x", schema="y")
         context.assert_("EXEC sp_rename 'y.t.c', x, 'COLUMN'")
 
     def test_create_index_mssql_include(self):
@@ -353,4 +372,75 @@ class OpTest(TestBase):
         )
         context.assert_contains(
             "CREATE INDEX ix_mytable_a_b ON mytable " "(col_a, col_b)"
+        )
+
+    @combinations(
+        (lambda: sqla_compat.Computed("foo * 5"), lambda: None),
+        (lambda: None, lambda: sqla_compat.Computed("foo * 5")),
+        (
+            lambda: sqla_compat.Computed("foo * 42"),
+            lambda: sqla_compat.Computed("foo * 5"),
+        ),
+    )
+    @config.requirements.computed_columns
+    def test_alter_column_computed_not_supported(self, sd, esd):
+        op_fixture("mssql")
+        assert_raises_message(
+            exc.CompileError,
+            'Adding or removing a "computed" construct, e.g. '
+            "GENERATED ALWAYS AS, to or from an existing column is not "
+            "supported.",
+            op.alter_column,
+            "t1",
+            "c1",
+            server_default=sd(),
+            existing_server_default=esd(),
+        )
+
+    @config.requirements.identity_columns
+    @combinations(
+        ({},),
+        (dict(always=True),),
+        (dict(start=3),),
+        (dict(start=3, increment=3),),
+    )
+    def test_add_column_identity(self, kw):
+        context = op_fixture("mssql")
+        op.add_column(
+            "t1",
+            Column("some_column", Integer, sqla_compat.Identity(**kw)),
+        )
+        if "start" in kw or "increment" in kw:
+            options = "(%s,%s)" % (
+                kw.get("start", 1),
+                kw.get("increment", 1),
+            )
+        else:
+            options = ""
+        context.assert_(
+            "ALTER TABLE t1 ADD some_column INTEGER NOT NULL IDENTITY%s"
+            % options
+        )
+
+    @combinations(
+        (lambda: sqla_compat.Identity(), lambda: None),
+        (lambda: None, lambda: sqla_compat.Identity()),
+        (
+            lambda: sqla_compat.Identity(),
+            lambda: sqla_compat.Identity(),
+        ),
+    )
+    @config.requirements.identity_columns
+    def test_alter_column_identity_add_not_supported(self, sd, esd):
+        op_fixture("mssql")
+        assert_raises_message(
+            exc.CompileError,
+            'Adding, removing or modifying an "identity" construct, '
+            "e.g. GENERATED AS IDENTITY, to or from an existing "
+            "column is not supported in this dialect.",
+            op.alter_column,
+            "t1",
+            "c1",
+            server_default=sd(),
+            existing_server_default=esd(),
         )

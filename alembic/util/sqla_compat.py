@@ -1,9 +1,12 @@
+import contextlib
 import re
 
 from sqlalchemy import __version__
+from sqlalchemy import inspect
 from sqlalchemy import schema
 from sqlalchemy import sql
 from sqlalchemy import types as sqltypes
+from sqlalchemy.engine import url
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.schema import CheckConstraint
 from sqlalchemy.schema import Column
@@ -26,27 +29,136 @@ def _safe_int(value):
 _vers = tuple(
     [_safe_int(x) for x in re.findall(r"(\d+|[abc]\d)", __version__)]
 )
-sqla_110 = _vers >= (1, 1, 0)
-sqla_1115 = _vers >= (1, 1, 15)
-sqla_120 = _vers >= (1, 2, 0)
-sqla_1216 = _vers >= (1, 2, 16)
 sqla_13 = _vers >= (1, 3)
 sqla_14 = _vers >= (1, 4)
+
 try:
     from sqlalchemy import Computed  # noqa
-
-    has_computed = True
 except ImportError:
     has_computed = False
+    has_computed_reflection = False
+else:
+    has_computed = True
+    has_computed_reflection = _vers >= (1, 3, 16)
+
+try:
+    from sqlalchemy import Identity  # noqa
+except ImportError:
+    has_identity = False
+else:
+    # attributes common to Indentity and Sequence
+    _identity_options_attrs = (
+        "start",
+        "increment",
+        "minvalue",
+        "maxvalue",
+        "nominvalue",
+        "nomaxvalue",
+        "cycle",
+        "cache",
+        "order",
+    )
+    # attributes of Indentity
+    _identity_attrs = _identity_options_attrs + ("on_null",)
+    has_identity = True
 
 AUTOINCREMENT_DEFAULT = "auto"
 
 
-def _server_default_is_computed(column):
+@contextlib.contextmanager
+def _ensure_scope_for_ddl(connection):
+    try:
+        in_transaction = connection.in_transaction
+    except AttributeError:
+        # catch for MockConnection
+        yield
+    else:
+        if not in_transaction():
+            with connection.begin():
+                yield
+        else:
+            yield
+
+
+def _safe_begin_connection_transaction(connection):
+    transaction = _get_connection_transaction(connection)
+    if transaction:
+        return transaction
+    else:
+        return connection.begin()
+
+
+def _get_connection_in_transaction(connection):
+    try:
+        in_transaction = connection.in_transaction
+    except AttributeError:
+        # catch for MockConnection
+        return False
+    else:
+        return in_transaction()
+
+
+def _copy(schema_item, **kw):
+    if hasattr(schema_item, "_copy"):
+        return schema_item._copy(**kw)
+    else:
+        return schema_item.copy(**kw)
+
+
+def _get_connection_transaction(connection):
+    if sqla_14:
+        return connection.get_transaction()
+    else:
+        return connection._root._Connection__transaction
+
+
+def _create_url(*arg, **kw):
+    if hasattr(url.URL, "create"):
+        return url.URL.create(*arg, **kw)
+    else:
+        return url.URL(*arg, **kw)
+
+
+def _connectable_has_table(connectable, tablename, schemaname):
+    if sqla_14:
+        return inspect(connectable).has_table(tablename, schemaname)
+    else:
+        return connectable.dialect.has_table(
+            connectable, tablename, schemaname
+        )
+
+
+def _exec_on_inspector(inspector, statement, **params):
+    if sqla_14:
+        with inspector._operation_context() as conn:
+            return conn.execute(statement, params)
+    else:
+        return inspector.bind.execute(statement, params)
+
+
+def _nullability_might_be_unset(metadata_column):
+    if not sqla_14:
+        return metadata_column.nullable
+    else:
+        from sqlalchemy.sql import schema
+
+        return (
+            metadata_column._user_defined_nullable is schema.NULL_UNSPECIFIED
+        )
+
+
+def _server_default_is_computed(*server_default):
     if not has_computed:
         return False
     else:
-        return isinstance(column.computed, Computed)
+        return any(isinstance(sd, Computed) for sd in server_default)
+
+
+def _server_default_is_identity(*server_default):
+    if not sqla_14:
+        return False
+    else:
+        return any(isinstance(sd, Identity) for sd in server_default)
 
 
 def _table_for_constraint(constraint):
@@ -63,6 +175,13 @@ def _columns_for_constraint(constraint):
         return _find_columns(constraint.sqltext)
     else:
         return list(constraint.columns)
+
+
+def _reflect_table(inspector, table, include_cols):
+    if sqla_14:
+        return inspector.reflect_table(table, None)
+    else:
+        return inspector.reflecttable(table, None)
 
 
 def _fk_spec(constraint):
@@ -243,38 +362,27 @@ def _constraint_is_named(constraint, dialect):
         return constraint.name is not None
 
 
-def _dialect_supports_comments(dialect):
-    if sqla_120:
-        return dialect.supports_comments
-    else:
-        return False
-
-
-def _comment_attribute(obj):
-    """return the .comment attribute from a Table or Column"""
-
-    if sqla_120:
-        return obj.comment
-    else:
-        return None
-
-
 def _is_mariadb(mysql_dialect):
-    return (
-        mysql_dialect.server_version_info
-        and "MariaDB" in mysql_dialect.server_version_info
-    )
+    if sqla_14:
+        return mysql_dialect.is_mariadb
+    else:
+        return mysql_dialect.server_version_info and mysql_dialect._is_mariadb
 
 
 def _mariadb_normalized_version_info(mysql_dialect):
-    if len(mysql_dialect.server_version_info) > 5:
-        return mysql_dialect.server_version_info[3:]
+    return mysql_dialect._mariadb_normalized_version_info
+
+
+def _insert_inline(table):
+    if sqla_14:
+        return table.insert().inline()
     else:
-        return mysql_dialect.server_version_info
+        return table.insert(inline=True)
 
 
 if sqla_14:
     from sqlalchemy import create_mock_engine
+    from sqlalchemy import select as _select
 else:
     from sqlalchemy import create_engine
 
@@ -282,3 +390,6 @@ else:
         return create_engine(
             "postgresql://", strategy="mock", executor=executor
         )
+
+    def _select(*columns):
+        return sql.select(list(columns))

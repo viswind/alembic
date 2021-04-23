@@ -20,6 +20,7 @@ from .base import compiles
 from .base import format_column_name
 from .base import format_table_name
 from .base import format_type
+from .base import IdentityColumnDefault
 from .base import RenameTable
 from .impl import DefaultImpl
 from .. import util
@@ -41,10 +42,15 @@ class PostgresqlImpl(DefaultImpl):
     type_synonyms = DefaultImpl.type_synonyms + (
         {"FLOAT", "DOUBLE PRECISION"},
     )
+    identity_attrs_ignore = ("on_null", "order")
 
-    def prep_table_for_batch(self, table):
+    def prep_table_for_batch(self, batch_impl, table):
+
         for constraint in table.constraints:
-            if constraint.name is not None:
+            if (
+                constraint.name is not None
+                and constraint.name in batch_impl.named_constraints
+            ):
                 self.drop_constraint(constraint)
 
     def compare_server_default(
@@ -88,7 +94,10 @@ class PostgresqlImpl(DefaultImpl):
             rendered_metadata_default = "'%s'" % rendered_metadata_default
 
         return not self.connection.scalar(
-            "SELECT %s = %s" % (conn_col_default, rendered_metadata_default)
+            text(
+                "SELECT %s = %s"
+                % (conn_col_default, rendered_metadata_default)
+            )
         )
 
     def alter_column(
@@ -152,7 +161,8 @@ class PostgresqlImpl(DefaultImpl):
                 r"nextval\('(.+?)'::regclass\)", column_info["default"]
             )
             if seq_match:
-                info = inspector.bind.execute(
+                info = sqla_compat._exec_on_inspector(
+                    inspector,
                     text(
                         "select c.relname, a.attname "
                         "from pg_class as c join "
@@ -292,6 +302,39 @@ def visit_column_comment(element, compiler, **kw):
     )
 
 
+@compiles(IdentityColumnDefault, "postgresql")
+def visit_identity_column(element, compiler, **kw):
+    text = "%s %s " % (
+        alter_table(compiler, element.table_name, element.schema),
+        alter_column(compiler, element.column_name),
+    )
+    if element.default is None:
+        # drop identity
+        text += "DROP IDENTITY"
+        return text
+    elif element.existing_server_default is None:
+        # add identity options
+        text += "ADD "
+        text += compiler.visit_identity_column(element.default)
+        return text
+    else:
+        # alter identity
+        diff, _, _ = element.impl._compare_identity_default(
+            element.default, element.existing_server_default
+        )
+        identity = element.default
+        for attr in sorted(diff):
+            if attr == "always":
+                text += "SET GENERATED %s " % (
+                    "ALWAYS" if identity.always else "BY DEFAULT"
+                )
+            else:
+                text += "SET %s " % compiler.get_identity_options(
+                    sqla_compat.Identity(**{attr: getattr(identity, attr)})
+                )
+        return text
+
+
 @Operations.register_operation("create_exclude_constraint")
 @BatchOperations.register_operation(
     "create_exclude_constraint", "batch_create_exclude_constraint"
@@ -391,8 +434,6 @@ class CreateExcludeConstraintOp(ops.AddConstraintOp):
          when issuing DDL for this constraint.
         :param schema: Optional schema name to operate within.
 
-        .. versionadded:: 0.9.0
-
         """
         op = cls(constraint_name, table_name, elements, **kw)
         return operations.invoke(op)
@@ -406,8 +447,6 @@ class CreateExcludeConstraintOp(ops.AddConstraintOp):
 
         .. note::  This method is Postgresql specific, and additionally
            requires at least SQLAlchemy 1.0.
-
-        .. versionadded:: 0.9.0
 
         .. seealso::
 

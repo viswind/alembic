@@ -19,12 +19,26 @@ from .base import format_type
 from .base import RenameTable
 from .impl import DefaultImpl
 from .. import util
+from ..util import sqla_compat
 
 
 class MSSQLImpl(DefaultImpl):
     __dialect__ = "mssql"
     transactional_ddl = True
     batch_separator = "GO"
+
+    type_synonyms = DefaultImpl.type_synonyms + ({"VARCHAR", "NVARCHAR"},)
+    identity_attrs_ignore = (
+        "minvalue",
+        "maxvalue",
+        "nominvalue",
+        "nomaxvalue",
+        "cycle",
+        "cache",
+        "order",
+        "on_null",
+        "order",
+    )
 
     def __init__(self, *arg, **kw):
         super(MSSQLImpl, self).__init__(*arg, **kw)
@@ -61,18 +75,34 @@ class MSSQLImpl(DefaultImpl):
         **kw
     ):
 
-        if nullable is not None and existing_type is None:
-            if type_ is not None:
-                existing_type = type_
+        if nullable is not None:
+            if existing_type is None:
+                if type_ is not None:
+                    existing_type = type_
+                    # the NULL/NOT NULL alter will handle
+                    # the type alteration
+                    type_ = None
+                else:
+                    raise util.CommandError(
+                        "MS-SQL ALTER COLUMN operations "
+                        "with NULL or NOT NULL require the "
+                        "existing_type or a new type_ be passed."
+                    )
+            elif type_ is not None:
                 # the NULL/NOT NULL alter will handle
                 # the type alteration
+                existing_type = type_
                 type_ = None
-            else:
-                raise util.CommandError(
-                    "MS-SQL ALTER COLUMN operations "
-                    "with NULL or NOT NULL require the "
-                    "existing_type or a new type_ be passed."
-                )
+
+        used_default = False
+        if sqla_compat._server_default_is_identity(
+            server_default, existing_server_default
+        ) or sqla_compat._server_default_is_computed(
+            server_default, existing_server_default
+        ):
+            used_default = True
+            kw["server_default"] = server_default
+            kw["existing_server_default"] = existing_server_default
 
         super(MSSQLImpl, self).alter_column(
             table_name,
@@ -85,7 +115,7 @@ class MSSQLImpl(DefaultImpl):
             **kw
         )
 
-        if server_default is not False:
+        if server_default is not False and used_default is False:
             if existing_server_default is not False or server_default is None:
                 self._exec(
                     _ExecDropConstraint(
@@ -154,6 +184,42 @@ class MSSQLImpl(DefaultImpl):
             table_name, column, schema=schema, **kw
         )
 
+    def compare_server_default(
+        self,
+        inspector_column,
+        metadata_column,
+        rendered_metadata_default,
+        rendered_inspector_default,
+    ):
+        def clean(value):
+            if value is not None:
+                value = value.strip()
+                while value[0] == "(" and value[-1] == ")":
+                    value = value[1:-1]
+            return value
+
+        return clean(rendered_inspector_default) != clean(
+            rendered_metadata_default
+        )
+
+    def _compare_identity_default(self, metadata_identity, inspector_identity):
+        diff, ignored, is_alter = super(
+            MSSQLImpl, self
+        )._compare_identity_default(metadata_identity, inspector_identity)
+
+        if (
+            metadata_identity is None
+            and inspector_identity is not None
+            and not diff
+            and inspector_identity.column is not None
+            and inspector_identity.column.primary_key
+        ):
+            # mssql reflect primary keys with autoincrement as identity
+            # columns. if no different attributes are present ignore them
+            is_alter = False
+
+        return diff, ignored, is_alter
+
 
 class _ExecDropConstraint(Executable, ClauseElement):
     def __init__(self, tname, colname, type_, schema):
@@ -203,7 +269,7 @@ select @const_name = [name] from
 sys.foreign_keys fk join sys.foreign_key_columns fkc
 on fk.object_id=fkc.constraint_object_id
 where fkc.parent_object_id = object_id('%(schema_dot)s%(tname)s')
-`and col_name(fkc.parent_object_id, fkc.parent_column_id) = '%(colname)s'
+and col_name(fkc.parent_object_id, fkc.parent_column_id) = '%(colname)s'
 exec('alter table %(tname_quoted)s drop constraint ' + @const_name)""" % {
         "tname": tname,
         "colname": colname,

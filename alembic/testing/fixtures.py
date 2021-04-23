@@ -8,11 +8,13 @@ from sqlalchemy import inspect
 from sqlalchemy import MetaData
 from sqlalchemy import String
 from sqlalchemy import Table
+from sqlalchemy import testing
 from sqlalchemy import text
 from sqlalchemy.testing import config
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.assertions import eq_
-from sqlalchemy.testing.fixtures import TestBase  # noqa
+from sqlalchemy.testing.fixtures import TablesTest as SQLAlchemyTablesTest
+from sqlalchemy.testing.fixtures import TestBase as SQLAlchemyTestBase
 
 import alembic
 from .assertions import _get_dialect
@@ -20,13 +22,51 @@ from ..environment import EnvironmentContext
 from ..migration import MigrationContext
 from ..operations import Operations
 from ..util import compat
+from ..util import sqla_compat
 from ..util.compat import configparser
 from ..util.compat import string_types
 from ..util.compat import text_type
 from ..util.sqla_compat import create_mock_engine
+from ..util.sqla_compat import sqla_14
+
 
 testing_config = configparser.ConfigParser()
 testing_config.read(["test.cfg"])
+
+
+class TestBase(SQLAlchemyTestBase):
+    is_sqlalchemy_future = False
+
+    @testing.fixture()
+    def ops_context(self, migration_context):
+        with migration_context.begin_transaction(_per_migration=True):
+            yield Operations(migration_context)
+
+    @testing.fixture
+    def migration_context(self, connection):
+        return MigrationContext.configure(
+            connection, opts=dict(transaction_per_migration=True)
+        )
+
+    @testing.fixture
+    def connection(self):
+        with config.db.connect() as conn:
+            yield conn
+
+
+class TablesTest(TestBase, SQLAlchemyTablesTest):
+    pass
+
+
+if sqla_14:
+    from sqlalchemy.testing.fixtures import FutureEngineMixin
+else:
+
+    class FutureEngineMixin(object):
+        __requires__ = ("sqlalchemy_14",)
+
+
+FutureEngineMixin.is_sqlalchemy_future = True
 
 
 def capture_db(dialect="postgresql://"):
@@ -144,9 +184,9 @@ def op_fixture(
         opts["as_sql"] = as_sql
     if literal_binds:
         opts["literal_binds"] = literal_binds
-    if dialect == "mariadb":
+    if not sqla_14 and dialect == "mariadb":
         ctx_dialect = _get_dialect("mysql")
-        ctx_dialect.server_version_info = (10, 0, 0, "MariaDB")
+        ctx_dialect.server_version_info = (10, 4, 0, "MariaDB")
 
     else:
         ctx_dialect = _get_dialect(dialect)
@@ -181,7 +221,7 @@ class AlterColRoundTripFixture(object):
     # the type / server default compare logic might not work on older
     # SQLAlchemy versions as seems to be the case for SQLAlchemy 1.1 on Oracle
 
-    __requires__ = ("alter_column", "sqlalchemy_12")
+    __requires__ = ("alter_column",)
 
     def setUp(self):
         self.conn = config.db.connect()
@@ -204,7 +244,8 @@ class AlterColRoundTripFixture(object):
         ), "server defaults %r and %r didn't compare as equivalent" % (s1, s2)
 
     def tearDown(self):
-        self.metadata.drop_all(self.conn)
+        with self.conn.begin():
+            self.metadata.drop_all(self.conn)
         self.conn.close()
 
     def _run_alter_col(self, from_, to_, compare=None):
@@ -217,26 +258,27 @@ class AlterColRoundTripFixture(object):
         )
         t = Table("x", self.metadata, column)
 
-        t.create(self.conn)
-        insp = inspect(self.conn)
-        old_col = insp.get_columns("x")[0]
+        with sqla_compat._ensure_scope_for_ddl(self.conn):
+            t.create(self.conn)
+            insp = inspect(self.conn)
+            old_col = insp.get_columns("x")[0]
 
-        # TODO: conditional comment support
-        self.op.alter_column(
-            "x",
-            column.name,
-            existing_type=column.type,
-            existing_server_default=column.server_default
-            if column.server_default is not None
-            else False,
-            existing_nullable=True if column.nullable else False,
-            # existing_comment=column.comment,
-            nullable=to_.get("nullable", None),
-            # modify_comment=False,
-            server_default=to_.get("server_default", False),
-            new_column_name=to_.get("name", None),
-            type_=to_.get("type", None),
-        )
+            # TODO: conditional comment support
+            self.op.alter_column(
+                "x",
+                column.name,
+                existing_type=column.type,
+                existing_server_default=column.server_default
+                if column.server_default is not None
+                else False,
+                existing_nullable=True if column.nullable else False,
+                # existing_comment=column.comment,
+                nullable=to_.get("nullable", None),
+                # modify_comment=False,
+                server_default=to_.get("server_default", False),
+                new_column_name=to_.get("name", None),
+                type_=to_.get("type", None),
+            )
 
         insp = inspect(self.conn)
         new_col = insp.get_columns("x")[0]

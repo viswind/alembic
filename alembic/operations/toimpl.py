@@ -2,7 +2,7 @@ from sqlalchemy import schema as sa_schema
 
 from . import ops
 from .base import Operations
-from ..util import sqla_compat
+from ..util.sqla_compat import _copy
 
 
 @Operations.implementation_for(ops.AlterColumnOp)
@@ -128,6 +128,9 @@ def add_column(operations, operation):
     schema = operation.schema
     kw = operation.kw
 
+    if column.table is not None:
+        column = _copy(column)
+
     t = operations.schema_obj.table(table_name, column, schema=schema)
     operations.impl.add_column(table_name, column, schema=schema, **kw)
 
@@ -138,10 +141,10 @@ def add_column(operations, operation):
         operations.impl.create_index(index)
 
     with_comment = (
-        sqla_compat._dialect_supports_comments(operations.impl.dialect)
+        operations.impl.dialect.supports_comments
         and not operations.impl.dialect.inline_comments
     )
-    comment = sqla_compat._comment_attribute(column)
+    comment = column.comment
     if comment and with_comment:
         operations.impl.create_column_comment(column)
 

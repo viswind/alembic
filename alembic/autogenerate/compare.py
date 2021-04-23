@@ -47,6 +47,10 @@ def _produce_net_changes(autogen_context, upgrade_ops):
     else:
         schemas = [None]
 
+    schemas = {
+        s for s in schemas if autogen_context.run_name_filters(s, "schema", {})
+    }
+
     comparators.dispatch("schema", autogen_context.dialect.name)(
         autogen_context, upgrade_ops, schemas
     )
@@ -63,13 +67,20 @@ def _autogen_for_tables(autogen_context, upgrade_ops, schemas):
     )
     version_table = autogen_context.migration_context.version_table
 
-    for s in schemas:
-        tables = set(inspector.get_table_names(schema=s))
-        if s == version_table_schema:
+    for schema_name in schemas:
+        tables = set(inspector.get_table_names(schema=schema_name))
+        if schema_name == version_table_schema:
             tables = tables.difference(
                 [autogen_context.migration_context.version_table]
             )
-        conn_table_names.update(zip([s] * len(tables), tables))
+
+        conn_table_names.update(
+            (schema_name, tname)
+            for tname in tables
+            if autogen_context.run_name_filters(
+                tname, "table", {"schema_name": schema_name}
+            )
+        )
 
     metadata_table_names = OrderedSet(
         [(table.schema, table.name) for table in autogen_context.sorted_tables]
@@ -125,7 +136,7 @@ def _compare_tables(
     for s, tname in metadata_table_names.difference(conn_table_names):
         name = "%s.%s" % (s, tname) if s else tname
         metadata_table = tname_to_table[(s, tname)]
-        if autogen_context.run_filters(
+        if autogen_context.run_object_filters(
             metadata_table, tname, "table", False, None
         ):
             upgrade_ops.ops.append(
@@ -161,8 +172,8 @@ def _compare_tables(
                 (inspector),
                 # fmt: on
             )
-            inspector.reflecttable(t, None)
-        if autogen_context.run_filters(t, tname, "table", True, None):
+            sqla_compat._reflect_table(inspector, t, None)
+        if autogen_context.run_object_filters(t, tname, "table", True, None):
 
             modify_table_ops = ops.ModifyTableOps(tname, [], schema=s)
 
@@ -192,7 +203,7 @@ def _compare_tables(
                 _compat_autogen_column_reflect(inspector),
                 # fmt: on
             )
-            inspector.reflecttable(t, None)
+            sqla_compat._reflect_table(inspector, t, None)
         conn_column_info[(s, tname)] = t
 
     for s, tname in sorted(existing_tables, key=lambda x: (x[0] or "", x[1])):
@@ -201,7 +212,7 @@ def _compare_tables(
         metadata_table = tname_to_table[(s, tname)]
         conn_table = existing_metadata.tables[name]
 
-        if autogen_context.run_filters(
+        if autogen_context.run_object_filters(
             metadata_table, tname, "table", False, conn_table
         ):
 
@@ -233,7 +244,8 @@ def _make_index(params, conn_table):
     ix = sa_schema.Index(
         params["name"],
         *[conn_table.c[cname] for cname in params["column_names"]],
-        unique=params["unique"]
+        unique=params["unique"],
+        _table=conn_table
     )
     if "duplicates_constraint" in params:
         ix.info["duplicates_constraint"] = params["duplicates_constraint"]
@@ -286,11 +298,17 @@ def _compare_columns(
     metadata_cols_by_name = dict(
         (c.name, c) for c in metadata_table.c if not c.system
     )
-    conn_col_names = dict((c.name, c) for c in conn_table.c)
+    conn_col_names = dict(
+        (c.name, c)
+        for c in conn_table.c
+        if autogen_context.run_name_filters(
+            c.name, "column", {"table_name": tname, "schema_name": schema}
+        )
+    )
     metadata_col_names = OrderedSet(sorted(metadata_cols_by_name))
 
     for cname in metadata_col_names.difference(conn_col_names):
-        if autogen_context.run_filters(
+        if autogen_context.run_object_filters(
             metadata_cols_by_name[cname], cname, "column", False, None
         ):
             modify_table_ops.ops.append(
@@ -303,7 +321,7 @@ def _compare_columns(
     for colname in metadata_col_names.intersection(conn_col_names):
         metadata_col = metadata_cols_by_name[colname]
         conn_col = conn_table.c[colname]
-        if not autogen_context.run_filters(
+        if not autogen_context.run_object_filters(
             metadata_col, colname, "column", False, conn_col
         ):
             continue
@@ -325,7 +343,7 @@ def _compare_columns(
     yield
 
     for cname in set(conn_col_names).difference(metadata_col_names):
-        if autogen_context.run_filters(
+        if autogen_context.run_object_filters(
             conn_table.c[cname], cname, "column", True, None
         ):
             modify_table_ops.ops.append(
@@ -471,6 +489,15 @@ def _compare_indexes_and_uniques(
                 # not being present
                 pass
             else:
+                conn_uniques = [
+                    uq
+                    for uq in conn_uniques
+                    if autogen_context.run_name_filters(
+                        uq["name"],
+                        "unique_constraint",
+                        {"table_name": tname, "schema_name": schema},
+                    )
+                ]
                 for uq in conn_uniques:
                     if uq.get("duplicates_index"):
                         unique_constraints_duplicate_unique_indexes = True
@@ -478,6 +505,16 @@ def _compare_indexes_and_uniques(
             conn_indexes = inspector.get_indexes(tname, schema=schema)
         except NotImplementedError:
             pass
+        else:
+            conn_indexes = [
+                ix
+                for ix in conn_indexes
+                if autogen_context.run_name_filters(
+                    ix["name"],
+                    "index",
+                    {"table_name": tname, "schema_name": schema},
+                )
+            ]
 
         # 2. convert conn-level objects from raw inspector records
         # into schema objects
@@ -578,7 +615,7 @@ def _compare_indexes_and_uniques(
 
     def obj_added(obj):
         if obj.is_index:
-            if autogen_context.run_filters(
+            if autogen_context.run_object_filters(
                 obj.const, obj.name, "index", False, None
             ):
                 modify_ops.ops.append(ops.CreateIndexOp.from_index(obj.const))
@@ -595,7 +632,7 @@ def _compare_indexes_and_uniques(
             if is_create_table or is_drop_table:
                 # unique constraints are created inline with table defs
                 return
-            if autogen_context.run_filters(
+            if autogen_context.run_object_filters(
                 obj.const, obj.name, "unique_constraint", False, None
             ):
                 modify_ops.ops.append(
@@ -615,7 +652,7 @@ def _compare_indexes_and_uniques(
                 # be sure what we're doing here
                 return
 
-            if autogen_context.run_filters(
+            if autogen_context.run_object_filters(
                 obj.const, obj.name, "index", True, None
             ):
                 modify_ops.ops.append(ops.DropIndexOp.from_index(obj.const))
@@ -627,7 +664,7 @@ def _compare_indexes_and_uniques(
                 # if the whole table is being dropped, we don't need to
                 # consider unique constraint separately
                 return
-            if autogen_context.run_filters(
+            if autogen_context.run_object_filters(
                 obj.const, obj.name, "unique_constraint", True, None
             ):
                 modify_ops.ops.append(
@@ -641,7 +678,7 @@ def _compare_indexes_and_uniques(
 
     def obj_changed(old, new, msg):
         if old.is_index:
-            if autogen_context.run_filters(
+            if autogen_context.run_object_filters(
                 new.const, new.name, "index", False, old.const
             ):
                 log.info(
@@ -653,7 +690,7 @@ def _compare_indexes_and_uniques(
                 modify_ops.ops.append(ops.DropIndexOp.from_index(old.const))
                 modify_ops.ops.append(ops.CreateIndexOp.from_index(new.const))
         else:
-            if autogen_context.run_filters(
+            if autogen_context.run_object_filters(
                 new.const, new.name, "unique_constraint", False, old.const
             ):
                 log.info(
@@ -669,9 +706,20 @@ def _compare_indexes_and_uniques(
                     ops.AddConstraintOp.from_constraint(new.const)
                 )
 
-    for added_name in sorted(set(metadata_names).difference(conn_names)):
-        obj = metadata_names[added_name]
-        obj_added(obj)
+    for removed_name in sorted(set(conn_names).difference(metadata_names)):
+        conn_obj = conn_names[removed_name]
+        if not conn_obj.is_index and conn_obj.sig in unnamed_metadata_uniques:
+            continue
+        elif removed_name in doubled_constraints:
+            if (
+                conn_obj.sig not in metadata_indexes_by_sig
+                and conn_obj.sig not in metadata_uniques_by_sig
+            ):
+                conn_uq, conn_idx = doubled_constraints[removed_name]
+                obj_removed(conn_uq)
+                obj_removed(conn_idx)
+        else:
+            obj_removed(conn_obj)
 
     for existing_name in sorted(set(metadata_names).intersection(conn_names)):
         metadata_obj = metadata_names[existing_name]
@@ -703,20 +751,9 @@ def _compare_indexes_and_uniques(
             if msg:
                 obj_changed(conn_obj, metadata_obj, msg)
 
-    for removed_name in sorted(set(conn_names).difference(metadata_names)):
-        conn_obj = conn_names[removed_name]
-        if not conn_obj.is_index and conn_obj.sig in unnamed_metadata_uniques:
-            continue
-        elif removed_name in doubled_constraints:
-            if (
-                conn_obj.sig not in metadata_indexes_by_sig
-                and conn_obj.sig not in metadata_uniques_by_sig
-            ):
-                conn_uq, conn_idx = doubled_constraints[removed_name]
-                obj_removed(conn_uq)
-                obj_removed(conn_idx)
-        else:
-            obj_removed(conn_obj)
+    for added_name in sorted(set(metadata_names).difference(conn_names)):
+        obj = metadata_names[added_name]
+        obj_added(obj)
 
     for uq_sig in unnamed_metadata_uniques:
         if uq_sig not in conn_uniques_by_sig:
@@ -801,22 +838,35 @@ def _compare_nullable(
     metadata_col,
 ):
 
-    # work around SQLAlchemy issue #3023
-    if metadata_col.primary_key:
-        return
-
     metadata_col_nullable = metadata_col.nullable
     conn_col_nullable = conn_col.nullable
     alter_column_op.existing_nullable = conn_col_nullable
 
     if conn_col_nullable is not metadata_col_nullable:
-        alter_column_op.modify_nullable = metadata_col_nullable
-        log.info(
-            "Detected %s on column '%s.%s'",
-            "NULL" if metadata_col_nullable else "NOT NULL",
-            tname,
-            cname,
-        )
+        if (
+            sqla_compat._server_default_is_computed(
+                metadata_col.server_default, conn_col.server_default
+            )
+            and sqla_compat._nullability_might_be_unset(metadata_col)
+            or (
+                sqla_compat._server_default_is_identity(
+                    metadata_col.server_default, conn_col.server_default
+                )
+            )
+        ):
+            log.info(
+                "Ignoring nullable change on identity column '%s.%s'",
+                tname,
+                cname,
+            )
+        else:
+            alter_column_op.modify_nullable = metadata_col_nullable
+            log.info(
+                "Detected %s on column '%s.%s'",
+                "NULL" if metadata_col_nullable else "NOT NULL",
+                tname,
+                cname,
+            )
 
 
 @comparators.dispatch_for("column")
@@ -911,6 +961,81 @@ def _render_server_default_for_compare(
         return None
 
 
+def _normalize_computed_default(sqltext):
+    """we want to warn if a computed sql expression has changed.  however
+    we don't want false positives and the warning is not that critical.
+    so filter out most forms of variability from the SQL text.
+
+    """
+
+    return re.sub(r"[ \(\)'\"`\[\]]", "", sqltext).lower()
+
+
+def _compare_computed_default(
+    autogen_context,
+    alter_column_op,
+    schema,
+    tname,
+    cname,
+    conn_col,
+    metadata_col,
+):
+    rendered_metadata_default = str(
+        metadata_col.server_default.sqltext.compile(
+            dialect=autogen_context.dialect,
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    # since we cannot change computed columns, we do only a crude comparison
+    # here where we try to eliminate syntactical differences in order to
+    # get a minimal comparison just to emit a warning.
+
+    rendered_metadata_default = _normalize_computed_default(
+        rendered_metadata_default
+    )
+
+    if isinstance(conn_col.server_default, sa_schema.Computed):
+        rendered_conn_default = str(
+            conn_col.server_default.sqltext.compile(
+                dialect=autogen_context.dialect,
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        if rendered_conn_default is None:
+            rendered_conn_default = ""
+        else:
+            rendered_conn_default = _normalize_computed_default(
+                rendered_conn_default
+            )
+    else:
+        rendered_conn_default = ""
+
+    if rendered_metadata_default != rendered_conn_default:
+        _warn_computed_not_supported(tname, cname)
+
+
+def _warn_computed_not_supported(tname, cname):
+    util.warn("Computed default on %s.%s cannot be modified" % (tname, cname))
+
+
+def _compare_identity_default(
+    autogen_context,
+    alter_column_op,
+    schema,
+    tname,
+    cname,
+    conn_col,
+    metadata_col,
+):
+    impl = autogen_context.migration_context.impl
+    diff, ignored_attr, is_alter = impl._compare_identity_default(
+        metadata_col.server_default, conn_col.server_default
+    )
+
+    return diff, is_alter
+
+
 @comparators.dispatch_for("column")
 def _compare_server_default(
     autogen_context,
@@ -927,36 +1052,73 @@ def _compare_server_default(
     if conn_col_default is None and metadata_default is None:
         return False
 
-    if sqla_compat.has_computed and isinstance(
-        metadata_default, sa_schema.Computed
-    ):
+    if sqla_compat._server_default_is_computed(metadata_default):
         # return False in case of a computed column as the server
         # default. Note that DDL for adding or removing "GENERATED AS" from
         # an existing column is not currently known for any backend.
         # Once SQLAlchemy can reflect "GENERATED" as the "computed" element,
         # we would also want to ignore and/or warn for changes vs. the
         # metadata (or support backend specific DDL if applicable).
+        if not sqla_compat.has_computed_reflection:
+            return False
+
+        else:
+            return _compare_computed_default(
+                autogen_context,
+                alter_column_op,
+                schema,
+                tname,
+                cname,
+                conn_col,
+                metadata_col,
+            )
+    if sqla_compat._server_default_is_computed(conn_col_default):
+        _warn_computed_not_supported(tname, cname)
         return False
 
-    rendered_metadata_default = _render_server_default_for_compare(
-        metadata_default, metadata_col, autogen_context
-    )
+    if sqla_compat._server_default_is_identity(
+        metadata_default, conn_col_default
+    ):
+        alter_column_op.existing_server_default = conn_col_default
+        diff, is_alter = _compare_identity_default(
+            autogen_context,
+            alter_column_op,
+            schema,
+            tname,
+            cname,
+            conn_col,
+            metadata_col,
+        )
+        if is_alter:
+            alter_column_op.modify_server_default = metadata_default
+            if diff:
+                log.info(
+                    "Detected server default on column '%s.%s': "
+                    "identity options attributes %s",
+                    tname,
+                    cname,
+                    sorted(diff),
+                )
+    else:
+        rendered_metadata_default = _render_server_default_for_compare(
+            metadata_default, metadata_col, autogen_context
+        )
 
-    rendered_conn_default = (
-        conn_col.server_default.arg.text if conn_col.server_default else None
-    )
+        rendered_conn_default = (
+            conn_col_default.arg.text if conn_col_default else None
+        )
 
-    alter_column_op.existing_server_default = conn_col_default
+        alter_column_op.existing_server_default = conn_col_default
 
-    isdiff = autogen_context.migration_context._compare_server_default(
-        conn_col,
-        metadata_col,
-        rendered_metadata_default,
-        rendered_conn_default,
-    )
-    if isdiff:
-        alter_column_op.modify_server_default = metadata_default
-        log.info("Detected server default on column '%s.%s'", tname, cname)
+        is_diff = autogen_context.migration_context._compare_server_default(
+            conn_col,
+            metadata_col,
+            rendered_metadata_default,
+            rendered_conn_default,
+        )
+        if is_diff:
+            alter_column_op.modify_server_default = metadata_default
+            log.info("Detected server default on column '%s.%s'", tname, cname)
 
 
 @comparators.dispatch_for("column")
@@ -970,7 +1132,7 @@ def _compare_column_comment(
     metadata_col,
 ):
 
-    if not sqla_compat._dialect_supports_comments(autogen_context.dialect):
+    if not autogen_context.dialect.supports_comments:
         return
 
     metadata_comment = metadata_col.comment
@@ -1007,7 +1169,15 @@ def _compare_foreign_keys(
         if isinstance(fk, sa_schema.ForeignKeyConstraint)
     )
 
-    conn_fks = inspector.get_foreign_keys(tname, schema=schema)
+    conn_fks = [
+        fk
+        for fk in inspector.get_foreign_keys(tname, schema=schema)
+        if autogen_context.run_name_filters(
+            fk["name"],
+            "foreign_key_constraint",
+            {"table_name": tname, "schema_name": schema},
+        )
+    ]
 
     backend_reflects_fk_options = conn_fks and "options" in conn_fks[0]
 
@@ -1040,7 +1210,7 @@ def _compare_foreign_keys(
     )
 
     def _add_fk(obj, compare_to):
-        if autogen_context.run_filters(
+        if autogen_context.run_object_filters(
             obj.const, obj.name, "foreign_key_constraint", False, compare_to
         ):
             modify_table_ops.ops.append(
@@ -1056,7 +1226,7 @@ def _compare_foreign_keys(
             )
 
     def _remove_fk(obj, compare_to):
-        if autogen_context.run_filters(
+        if autogen_context.run_object_filters(
             obj.const, obj.name, "foreign_key_constraint", True, compare_to
         ):
             modify_table_ops.ops.append(
@@ -1104,7 +1274,7 @@ def _compare_table_comment(
     metadata_table,
 ):
 
-    if not sqla_compat._dialect_supports_comments(autogen_context.dialect):
+    if not autogen_context.dialect.supports_comments:
         return
 
     # if we're doing CREATE TABLE, comments will be created inline
