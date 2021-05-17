@@ -1,9 +1,12 @@
+import shlex
 import subprocess
 import sys
 
 from .. import util
 from ..util import compat
 
+
+REVISION_SCRIPT_TOKEN = "REVISION_SCRIPT_FILENAME"
 
 _registry = {}
 
@@ -85,6 +88,25 @@ def _run_hooks(path, hook_config):
             )
 
 
+def _parse_cmdline_options(cmdline_options_str, path):
+    """Parse options from a string into a list.
+
+    Also substitutes the revision script token with the actual filename of
+    the revision script.
+
+    If the revision script token doesn't occur in the options string, it is
+    automatically prepended.
+    """
+    if REVISION_SCRIPT_TOKEN not in cmdline_options_str:
+        cmdline_options_str = REVISION_SCRIPT_TOKEN + " " + cmdline_options_str
+    cmdline_options_list = shlex.split(cmdline_options_str)
+    cmdline_options_list = [
+        option.replace(REVISION_SCRIPT_TOKEN, path)
+        for option in cmdline_options_list
+    ]
+    return cmdline_options_list
+
+
 @register("console_scripts")
 def console_scripts(path, options):
     import pkg_resources
@@ -101,14 +123,17 @@ def console_scripts(path, options):
         )
     iter_ = pkg_resources.iter_entry_points("console_scripts", entrypoint_name)
     impl = next(iter_)
-    options = options.get("options", "")
+    cwd = options.get("cwd", None)
+    cmdline_options_str = options.get("options", "")
+    cmdline_options_list = _parse_cmdline_options(cmdline_options_str, path)
+
     subprocess.run(
         [
             sys.executable,
             "-c",
             "import %s; %s()"
             % (impl.module_name, ".".join((impl.module_name,) + impl.attrs)),
-            path,
         ]
-        + options.split()
+        + cmdline_options_list,
+        cwd=cwd,
     )
