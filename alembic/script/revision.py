@@ -833,7 +833,6 @@ class RevisionMap(object):
                 key=inserted_order.index,
             )
         )
-
         ancestors_by_idx = [get_ancestors(rev_id) for rev_id in current_heads]
 
         output = []
@@ -864,7 +863,6 @@ class RevisionMap(object):
 
                 candidate_rev = id_to_rev[candidate]
 
-                # immediate ancestor nodes
                 heads_to_add = [
                     r
                     for r in candidate_rev._normalized_down_revisions
@@ -1421,7 +1419,7 @@ class Revision(object):
 
     @property
     def _all_down_revisions(self):
-        return (
+        return util.dedupe_tuple(
             util.to_tuple(self.down_revision, default=())
             + self._resolved_dependencies
         )
@@ -1432,7 +1430,7 @@ class Revision(object):
         that are still dependencies of ancestors.
 
         """
-        return (
+        return util.dedupe_tuple(
             util.to_tuple(self.down_revision, default=())
             + self._normalized_resolved_dependencies
         )
